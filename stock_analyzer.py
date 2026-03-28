@@ -457,10 +457,16 @@ def main():
         ma60 = analysis['ma60_trend']
         print(f"📊 MA60趋势: {'向上' if ma60['trend'] == 'up' else '向下'}")
     
-    output_path = f"/tmp/{stock_info['stock_code']}_analysis.png"
+    # 确保 /root/.openclaw/ 目录存在
+    import os
+    output_dir = "/root/.openclaw"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    output_path = f"{output_dir}/{stock_info['stock_code']}_analysis.png"
     generate_chart(stock_info, analysis, output_path)
     
-    print(f"\n🖼️  图表路径: {output_path}")
+    print(f"\nMEDIA: {output_path}")
     
     if '--json' in sys.argv:
         result['chart_path'] = output_path
