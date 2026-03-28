@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 股票技术分析工具 - 支持A股、港股、美股
-获取历史数据、计算趋势、支撑压力位、ZigZag转折点，并生成图表
+获取多时间周期历史数据（周、日、小时、分钟）、计算趋势、支撑压力位、ZigZag转折点，并生成图表
 """
 
 import requests
@@ -18,7 +18,6 @@ from io import BytesIO
 
 def search_stock_by_name(company_name):
     """通过公司名称搜索股票代码 - 支持A股、港股、美股"""
-    # 先尝试东方财富搜索（支持A股和港股）
     search_url = f"http://searchapi.eastmoney.com/api/suggest/get?input={company_name}&type=14&token=D43BF722C8E33BD8C8B185F60AA70F4E&count=10"
     
     try:
@@ -33,7 +32,6 @@ def search_stock_by_name(company_name):
                     name = item.get('Name', '')
                     market = item.get('Market', '')
                     
-                    # A股判断
                     if (code.startswith('600') or code.startswith('601') or 
                         code.startswith('603') or code.startswith('605') or
                         code.startswith('000') or code.startswith('001') or 
@@ -44,7 +42,6 @@ def search_stock_by_name(company_name):
                             'market': 'SH' if code.startswith('6') else 'SZ',
                             'type': 'A股'
                         })
-                    # 港股判断
                     elif code.startswith('00') or code.startswith('01') or code.startswith('02'):
                         stocks.append({
                             'code': code,
@@ -53,7 +50,6 @@ def search_stock_by_name(company_name):
                             'type': '港股'
                         })
                 
-                # 如果没有找到，尝试美股搜索
                 if not stocks:
                     us_stocks = search_us_stock(company_name)
                     stocks.extend(us_stocks)
@@ -66,8 +62,6 @@ def search_stock_by_name(company_name):
 
 def search_us_stock(company_name):
     """搜索美股"""
-    # 使用Alpha Vantage或其他API搜索美股
-    # 这里简化处理，返回一些常见美股
     common_us_stocks = {
         '腾讯': {'code': 'TCEHY', 'name': '腾讯控股 ADR', 'market': 'US'},
         '阿里巴巴': {'code': 'BABA', 'name': '阿里巴巴', 'market': 'US'},
@@ -93,10 +87,9 @@ def search_us_stock(company_name):
     
     return results
 
-def get_stock_history(stock_code, market=None, days=60):
-    """获取股票历史数据 - 支持A股、港股、美股"""
+def get_stock_history(stock_code, market=None, period='daily', count=60):
+    """获取股票历史数据 - 支持多时间周期"""
     
-    # 自动判断市场
     if not market:
         if stock_code.startswith('600') or stock_code.startswith('601') or \
            stock_code.startswith('603') or stock_code.startswith('605'):
@@ -111,27 +104,45 @@ def get_stock_history(stock_code, market=None, days=60):
             market = 'US'
     
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=days*2)
     
-    if market in ['SH', 'SZ']:
-        return get_a_stock_history(stock_code, market, start_date, end_date, days)
-    elif market == 'HK':
-        return get_hk_stock_history(stock_code, start_date, end_date, days)
+    if period == 'weekly':
+        start_date = end_date - timedelta(weeks=count*2)
+        klt = '102'  # 周K
+    elif period == 'hourly':
+        start_date = end_date - timedelta(hours=count*2)
+        klt = '60'  # 小时K
+    elif period == 'minute':
+        start_date = end_date - timedelta(minutes=count*2)
+        klt = '1'  # 分钟K
+    else:  # daily
+        start_date = end_date - timedelta(days=count*2)
+        klt = '101'  # 日K
+    
+    if market in ['SH', 'SZ', 'HK']:
+        return get_cn_stock_history(stock_code, market, start_date, end_date, klt, count, period)
     elif market == 'US':
-        return get_us_stock_history(stock_code, start_date, end_date, days)
+        return get_us_stock_history(stock_code, start_date, end_date, count, period)
     else:
         return {'success': False, 'error': '不支持的市场类型'}
 
-def get_a_stock_history(stock_code, market, start_date, end_date, days):
-    """获取A股历史数据"""
+def get_cn_stock_history(stock_code, market, start_date, end_date, klt, count, period):
+    """获取A股/港股历史数据"""
     url = f"http://push2his.eastmoney.com/api/qt/stock/kline/get"
+    
+    if market == 'SH':
+        secid = f"1.{stock_code}"
+    elif market == 'SZ':
+        secid = f"0.{stock_code}"
+    elif market == 'HK':
+        secid = f"116.{stock_code}"
+    
     params = {
-        'secid': f"1.{stock_code}" if market == 'SH' else f"0.{stock_code}",
+        'secid': secid,
         'ut': 'fa5fd1943c7b386f172d6893dbfba10b',
         'fields1': 'f1,f2,f3,f4,f5,f6',
         'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-        'klt': '101',  # 101=日K
-        'fqt': '1',    # 1=前复权
+        'klt': klt,
+        'fqt': '1',
         'beg': start_date.strftime('%Y%m%d'),
         'end': end_date.strftime('%Y%m%d'),
         '_': '1'
@@ -171,80 +182,33 @@ def get_a_stock_history(stock_code, market, start_date, end_date, days):
                     'success': True,
                     'stock_code': f'{stock_code}.{market}',
                     'name': stock_name,
-                    'data': history_data[-days:]
+                    'period': period,
+                    'data': history_data[-count:]
                 }
         
-        return {'success': False, 'error': '无法获取A股历史数据'}
+        return {'success': False, 'error': f'无法获取{period}历史数据'}
     except Exception as e:
-        return {'success': False, 'error': f'获取A股历史数据失败: {str(e)}'}
+        return {'success': False, 'error': f'获取{period}历史数据失败: {str(e)}'}
 
-def get_hk_stock_history(stock_code, start_date, end_date, days):
-    """获取港股历史数据 - 使用东方财富API"""
-    url = f"http://push2his.eastmoney.com/api/qt/stock/kline/get"
-    params = {
-        'secid': f"116.{stock_code}",  # 116=港股
-        'ut': 'fa5fd1943c7b386f172d6893dbfba10b',
-        'fields1': 'f1,f2,f3,f4,f5,f6',
-        'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-        'klt': '101',
-        'fqt': '1',
-        'beg': start_date.strftime('%Y%m%d'),
-        'end': end_date.strftime('%Y%m%d'),
-        '_': '1'
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('data') and data['data'].get('klines'):
-                klines = data['data']['klines']
-                stock_name = data['data'].get('name', stock_code)
-                
-                history_data = []
-                for kline in klines:
-                    parts = kline.split(',')
-                    if len(parts) >= 7:
-                        date = parts[0]
-                        open_price = float(parts[1])
-                        close_price = float(parts[2])
-                        high_price = float(parts[3])
-                        low_price = float(parts[4])
-                        volume = float(parts[5])
-                        amount = float(parts[6])
-                        
-                        history_data.append({
-                            'date': date,
-                            'open': open_price,
-                            'close': close_price,
-                            'high': high_price,
-                            'low': low_price,
-                            'volume': volume,
-                            'amount': amount
-                        })
-                
-                return {
-                    'success': True,
-                    'stock_code': f'{stock_code}.HK',
-                    'name': stock_name,
-                    'data': history_data[-days:]
-                }
-        
-        return {'success': False, 'error': '无法获取港股历史数据'}
-    except Exception as e:
-        return {'success': False, 'error': f'获取港股历史数据失败: {str(e)}'}
-
-def get_us_stock_history(stock_code, start_date, end_date, days):
+def get_us_stock_history(stock_code, start_date, end_date, count, period):
     """获取美股历史数据 - 使用Yahoo Finance API"""
-    # 将日期转换为时间戳
     period1 = int(start_date.timestamp())
     period2 = int(end_date.timestamp())
+    
+    if period == 'weekly':
+        interval = '1wk'
+    elif period == 'hourly':
+        interval = '1h'
+    elif period == 'minute':
+        interval = '1m'
+    else:
+        interval = '1d'
     
     url = f"https://query1.finance.yahoo.com/v7/finance/download/{stock_code}"
     params = {
         'period1': period1,
         'period2': period2,
-        'interval': '1d',
+        'interval': interval,
         'events': 'history',
         'includeAdjustedClose': 'true'
     }
@@ -257,7 +221,6 @@ def get_us_stock_history(stock_code, start_date, end_date, days):
                 return {'success': False, 'error': '没有找到美股数据'}
             
             history_data = []
-            # 跳过表头
             for line in lines[1:]:
                 parts = line.split(',')
                 if len(parts) >= 7:
@@ -272,23 +235,24 @@ def get_us_stock_history(stock_code, start_date, end_date, days):
                     history_data.append({
                         'date': date,
                         'open': open_price,
-                        'close': adj_close,  # 使用调整后的收盘价
+                        'close': adj_close,
                         'high': high_price,
                         'low': low_price,
                         'volume': volume,
-                        'amount': volume * adj_close  # 估算成交额
+                        'amount': volume * adj_close
                     })
             
             return {
                 'success': True,
                 'stock_code': f'{stock_code}.US',
                 'name': stock_code,
-                'data': history_data[-days:]
+                'period': period,
+                'data': history_data[-count:]
             }
         
-        return {'success': False, 'error': '无法获取美股历史数据'}
+        return {'success': False, 'error': f'无法获取{period}历史数据'}
     except Exception as e:
-        return {'success': False, 'error': f'获取美股历史数据失败: {str(e)}'}
+        return {'success': False, 'error': f'获取{period}历史数据失败: {str(e)}'}
 
 def linear_regression_trend(prices):
     """最小二乘法线性回归计算趋势"""
@@ -444,137 +408,9 @@ def zigzag_algorithm(data, threshold=0.05):
     
     return zigzag_points
 
-def generate_chart(stock_info, analysis_data, output_path=None):
-    """生成分析图表"""
+def analyze_single_period(stock_info, ma_periods=[20, 60], zz_threshold=0.05):
+    """分析单个时间周期"""
     data = stock_info['data']
-    dates = [d['date'] for d in data]
-    closes = [d['close'] for d in data]
-    highs = [d['high'] for d in data]
-    lows = [d['low'] for d in data]
-    
-    fig = plt.figure(figsize=(16, 12))
-    
-    ax1 = plt.subplot(3, 1, 1)
-    ax1.plot(dates, closes, label='收盘价', linewidth=2, color='blue')
-    
-    if 'ma20' in analysis_data:
-        ax1.plot(dates, analysis_data['ma20'], label='MA20', linewidth=1.5, color='orange', alpha=0.8)
-    if 'ma60' in analysis_data:
-        ax1.plot(dates, analysis_data['ma60'], label='MA60', linewidth=1.5, color='green', alpha=0.8)
-    
-    if 'linear_regression' in analysis_data:
-        lr = analysis_data['linear_regression']
-        x = np.arange(len(closes))
-        trend_line = lr['slope'] * x + lr['intercept']
-        ax1.plot(dates, trend_line, label=f'趋势线 (R²={lr["r_squared"]:.3f})', 
-                 linewidth=2, color='red', linestyle='--')
-    
-    if 'support_resistance' in analysis_data:
-        sr = analysis_data['support_resistance']
-        for support in sr['supports']:
-            ax1.axhline(y=support['price'], color='green', linestyle=':', linewidth=1, alpha=0.6)
-        for resistance in sr['resistances']:
-            ax1.axhline(y=resistance['price'], color='red', linestyle=':', linewidth=1, alpha=0.6)
-    
-    if 'zigzag' in analysis_data:
-        zz = analysis_data['zigzag']
-        zz_dates = [dates[p['index']] for p in zz]
-        zz_prices = [p['price'] for p in zz]
-        ax1.plot(zz_dates, zz_prices, label='ZigZag', linewidth=2, color='purple', marker='o', markersize=4)
-    
-    ax1.set_title(f'{stock_info["name"]} ({stock_info["stock_code"]}) - 技术分析', fontsize=14, fontweight='bold')
-    ax1.legend(loc='upper left')
-    ax1.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    ax1.xaxis.set_major_locator(plt.MaxNLocator(10))
-    
-    ax2 = plt.subplot(3, 1, 2, sharex=ax1)
-    volumes = [d['volume'] for d in data]
-    colors = ['green' if closes[i] >= closes[i-1] else 'red' for i in range(1, len(closes))]
-    colors = ['gray'] + colors
-    ax2.bar(dates, volumes, label='成交量', color=colors, alpha=0.6)
-    ax2.set_ylabel('成交量')
-    ax2.legend(loc='upper left')
-    ax2.grid(True, alpha=0.3)
-    plt.xticks(rotation=45)
-    
-    ax3 = plt.subplot(3, 1, 3)
-    ax3.axis('off')
-    
-    summary_text = f"【分析总结】\n\n"
-    
-    if 'linear_regression' in analysis_data:
-        lr = analysis_data['linear_regression']
-        summary_text += f"线性回归趋势：{'📈 上涨' if lr['trend'] == 'up' else '📉 下跌'}\n"
-        summary_text += f"趋势强度：{lr['strength']:.2f}% | R²：{lr['r_squared']:.3f}\n\n"
-    
-    if 'ma20_trend' in analysis_data:
-        ma20 = analysis_data['ma20_trend']
-        summary_text += f"MA20趋势：{'📈 向上' if ma20['trend'] == 'up' else '📉 向下'}\n"
-        summary_text += f"MA20动量：{ma20['momentum']:.2f}%\n\n"
-    
-    if 'ma60_trend' in analysis_data:
-        ma60 = analysis_data['ma60_trend']
-        summary_text += f"MA60趋势：{'📈 向上' if ma60['trend'] == 'up' else '📉 向下'}\n\n"
-    
-    if 'support_resistance' in analysis_data:
-        sr = analysis_data['support_resistance']
-        if sr['supports']:
-            nearest_support = min(sr['supports'], key=lambda x: len(data)-1 - x['index'])
-            summary_text += f"最近支撑位：¥{nearest_support['price']:.2f} ({nearest_support['date']})\n"
-        if sr['resistances']:
-            nearest_resistance = min(sr['resistances'], key=lambda x: len(data)-1 - x['index'])
-            summary_text += f"最近压力位：¥{nearest_resistance['price']:.2f} ({nearest_resistance['date']})\n\n"
-    
-    if 'zigzag' in analysis_data and len(analysis_data['zigzag']) >= 2:
-        zz = analysis_data['zigzag']
-        last_point = zz[-1]
-        prev_point = zz[-2]
-        if last_point['type'] == 'low':
-            summary_text += f"📊 ZigZag：最后一个点是底部 (¥{last_point['price']:.2f})\n"
-        else:
-            summary_text += f"📊 ZigZag：最后一个点是顶部 (¥{last_point['price']:.2f})\n"
-    
-    summary_text += f"\n数据更新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    
-    ax3.text(0.05, 0.95, summary_text, transform=ax3.transAxes,
-             fontsize=11, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    plt.tight_layout()
-    
-    if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"图表已保存到: {output_path}")
-    
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    plt.close()
-    buf.seek(0)
-    
-    return buf
-
-def analyze_stock(query, days=60, ma_periods=[20, 60], zz_threshold=0.05):
-    """完整的股票分析流程"""
-    stocks = search_stock_by_name(query)
-    
-    if not stocks:
-        return {'success': False, 'error': f'未找到名为 "{query}" 的股票'}
-    
-    if len(stocks) > 1:
-        return {'success': False, 'error': '找到多个匹配公司', 'candidates': stocks}
-    
-    stock = stocks[0]
-    stock_code = stock['code']
-    market = stock['market']
-    
-    print(f"🔍 正在分析: {stock['name']} ({stock['type']})")
-    
-    history_result = get_stock_history(stock_code, market, days)
-    if not history_result['success']:
-        return history_result
-    
-    data = history_result['data']
     closes = [d['close'] for d in data]
     
     analysis_data = {}
@@ -589,15 +425,126 @@ def analyze_stock(query, days=60, ma_periods=[20, 60], zz_threshold=0.05):
     analysis_data['support_resistance'] = find_support_resistance(data)
     analysis_data['zigzag'] = zigzag_algorithm(data, zz_threshold)
     
+    return analysis_data
+
+def generate_multi_period_chart(stock_name, stock_code, period_results, output_path=None):
+    """生成多时间周期分析图表"""
+    periods = list(period_results.keys())
+    n_periods = len(periods)
+    
+    fig = plt.figure(figsize=(16, 5 * n_periods))
+    
+    for i, period in enumerate(periods):
+        result = period_results[period]
+        stock_info = result['stock_info']
+        analysis = result['analysis']
+        data = stock_info['data']
+        dates = [d['date'] for d in data]
+        closes = [d['close'] for d in data]
+        
+        ax = plt.subplot(n_periods, 1, i + 1)
+        ax.plot(dates, closes, label='收盘价', linewidth=2, color='blue')
+        
+        if 'ma20' in analysis:
+            ax.plot(dates, analysis['ma20'], label='MA20', linewidth=1.5, color='orange', alpha=0.8)
+        if 'ma60' in analysis:
+            ax.plot(dates, analysis['ma60'], label='MA60', linewidth=1.5, color='green', alpha=0.8)
+        
+        if 'linear_regression' in analysis:
+            lr = analysis['linear_regression']
+            x = np.arange(len(closes))
+            trend_line = lr['slope'] * x + lr['intercept']
+            ax.plot(dates, trend_line, label=f'趋势线 (R²={lr["r_squared"]:.3f})', 
+                     linewidth=2, color='red', linestyle='--')
+        
+        period_label = {
+            'weekly': '周线',
+            'daily': '日线',
+            'hourly': '小时线',
+            'minute': '分钟线'
+        }.get(period, period)
+        
+        ax.set_title(f'{stock_name} ({stock_code}) - {period_label}分析', fontsize=12, fontweight='bold')
+        ax.legend(loc='upper left', fontsize=8)
+        ax.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(8))
+        
+        summary_text = f"{period_label}总结:\n"
+        if 'linear_regression' in analysis:
+            lr = analysis['linear_regression']
+            summary_text += f"趋势: {'📈上涨' if lr['trend'] == 'up' else '📉下跌'} | R²: {lr['r_squared']:.3f}\n"
+        if 'ma20_trend' in analysis:
+            ma20 = analysis['ma20_trend']
+            summary_text += f"MA20: {'向上' if ma20['trend'] == 'up' else '向下'}\n"
+        if 'ma60_trend' in analysis:
+            ma60 = analysis['ma60_trend']
+            summary_text += f"MA60: {'向上' if ma60['trend'] == 'up' else '向下'}"
+        
+        ax.text(0.02, 0.98, summary_text, transform=ax.transAxes,
+                fontsize=9, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"图表已保存到: {output_path}")
+    
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    plt.close()
+    buf.seek(0)
+    
+    return buf
+
+def analyze_stock_multi_period(query, periods=['weekly', 'daily'], count=60):
+    """多时间周期股票分析"""
+    stocks = search_stock_by_name(query)
+    
+    if not stocks:
+        return {'success': False, 'error': f'未找到名为 "{query}" 的股票'}
+    
+    if len(stocks) > 1:
+        return {'success': False, 'error': '找到多个匹配公司', 'candidates': stocks}
+    
+    stock = stocks[0]
+    stock_code = stock['code']
+    market = stock['market']
+    stock_name = stock['name']
+    
+    print(f"🔍 正在分析: {stock_name} ({stock.get('type', '')})")
+    
+    period_results = {}
+    
+    for period in periods:
+        print(f"  正在获取{period}数据...")
+        history_result = get_stock_history(stock_code, market, period, count)
+        
+        if history_result['success']:
+            analysis = analyze_single_period(history_result)
+            period_results[period] = {
+                'stock_info': history_result,
+                'analysis': analysis
+            }
+            print(f"  ✅ {period}分析完成")
+        else:
+            print(f"  ❌ {period}获取失败: {history_result.get('error', '未知错误')}")
+            print(f"  ⏭️  跳过{period}，继续下一个周期")
+    
+    if not period_results:
+        return {'success': False, 'error': '所有时间周期数据获取失败'}
+    
     return {
         'success': True,
-        'stock_info': history_result,
-        'analysis': analysis_data
+        'stock_name': stock_name,
+        'stock_code': f'{stock_code}.{market}',
+        'period_results': period_results
     }
 
 def main():
     if len(sys.argv) < 2:
-        print("使用方法: python stock_analyzer.py <公司名称或股票代码> [天数]")
+        print("使用方法: python stock_analyzer.py <公司名称或股票代码> [周期数]")
         print("示例:")
         print("  python stock_analyzer.py 阳光电源 60")
         print("  python stock_analyzer.py 腾讯控股 60")
@@ -605,9 +552,10 @@ def main():
         sys.exit(1)
     
     query = sys.argv[1]
-    days = int(sys.argv[2]) if len(sys.argv) > 2 else 60
+    count = int(sys.argv[2]) if len(sys.argv) > 2 else 60
     
-    result = analyze_stock(query, days)
+    periods = ['weekly', 'daily', 'hourly', 'minute']
+    result = analyze_stock_multi_period(query, periods, count)
     
     if not result['success']:
         print(f"❌ {result['error']}")
@@ -617,37 +565,40 @@ def main():
                 print(f"  • {stock['name']} ({stock['code']}.{stock['market']}) - {stock.get('type', '')}")
         sys.exit(1)
     
-    stock_info = result['stock_info']
-    analysis = result['analysis']
+    stock_name = result['stock_name']
+    stock_code = result['stock_code']
+    period_results = result['period_results']
     
-    print(f"\n✅ 分析完成: {stock_info['name']} ({stock_info['stock_code']})")
-    print(f"📊 数据范围: {stock_info['data'][0]['date']} 至 {stock_info['data'][-1]['date']}")
+    print(f"\n✅ 多时间周期分析完成: {stock_name} ({stock_code})")
+    print(f"\n📊 各时间周期分析:")
     
-    lr = analysis['linear_regression']
-    print(f"\n📈 线性回归趋势: {'上涨' if lr['trend'] == 'up' else '下跌'}")
-    print(f"   斜率: {lr['slope']:.4f}, R²: {lr['r_squared']:.3f}")
-    
-    if 'ma20_trend' in analysis:
-        ma20 = analysis['ma20_trend']
-        print(f"📊 MA20趋势: {'向上' if ma20['trend'] == 'up' else '向下'}")
-    
-    if 'ma60_trend' in analysis:
-        ma60 = analysis['ma60_trend']
-        print(f"📊 MA60趋势: {'向上' if ma60['trend'] == 'up' else '向下'}")
+    for period, pr in period_results.items():
+        period_label = {
+            'weekly': '周线',
+            'daily': '日线',
+            'hourly': '小时线',
+            'minute': '分钟线'
+        }.get(period, period)
+        
+        analysis = pr['analysis']
+        lr = analysis['linear_regression']
+        ma20 = analysis.get('ma20_trend', {}).get('trend', 'N/A')
+        ma60 = analysis.get('ma60_trend', {}).get('trend', 'N/A')
+        
+        print(f"\n  {period_label}:")
+        print(f"    趋势: {'📈上涨' if lr['trend'] == 'up' else '📉下跌'} (R²: {lr['r_squared']:.3f})")
+        print(f"    MA20: {'向上' if ma20 == 'up' else '向下'}")
+        print(f"    MA60: {'向上' if ma60 == 'up' else '向下'}")
     
     import os
     output_dir = "/root/.openclaw"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
-    output_path = f"{output_dir}/{stock_info['stock_code']}_analysis.png"
-    generate_chart(stock_info, analysis, output_path)
+    output_path = f"{output_dir}/{stock_code}_multi_period_analysis.png"
+    generate_multi_period_chart(stock_name, stock_code, period_results, output_path)
     
     print(f"\nMEDIA: {output_path}")
-    
-    if '--json' in sys.argv:
-        result['chart_path'] = output_path
-        print("\n" + json.dumps(result, ensure_ascii=False, indent=2))
     
     return 0
 
