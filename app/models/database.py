@@ -28,7 +28,7 @@ class DatabaseManager:
     def create_stock_table(self, market: str, table_name: str):
         conn = self.get_connection(market)
         conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {table_name} (
+            CREATE TABLE IF NOT EXISTS "{table_name}" (
                 timestamp TIMESTAMP PRIMARY KEY,
                 open DOUBLE,
                 high DOUBLE,
@@ -45,7 +45,7 @@ class DatabaseManager:
             return None
         conn = self.get_connection(market)
         result = conn.execute(
-            f"SELECT MAX(timestamp) FROM {table_name}"
+            f'SELECT MAX(timestamp) FROM "{table_name}"'
         ).fetchone()
         return result[0] if result and result[0] else None
 
@@ -65,7 +65,7 @@ class DatabaseManager:
         if df.empty:
             return 0
 
-        conn.execute(f"INSERT INTO {table_name} SELECT * FROM df")
+        conn.execute(f'INSERT INTO "{table_name}" SELECT * FROM df')
         return len(df)
 
     def get_data(self, market: str, table_name: str, limit: int = 200) -> pd.DataFrame:
@@ -73,7 +73,7 @@ class DatabaseManager:
             return pd.DataFrame()
         conn = self.get_connection(market)
         return conn.execute(
-            f"SELECT * FROM {table_name} ORDER BY timestamp DESC LIMIT {limit}"
+            f'SELECT * FROM "{table_name}" ORDER BY timestamp DESC LIMIT {limit}'
         ).fetchdf()
 
     def close_all(self):
