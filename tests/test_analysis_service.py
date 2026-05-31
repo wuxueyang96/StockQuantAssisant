@@ -61,11 +61,17 @@ class TestAnalyzeStockResponseShape:
 
         for k in ('market', 'stock_code', 'display_code', 'timestamp', 'close',
                   'action', 'weight', 'confidence', 'execute_at',
-                  'position', 'signals', 'standards', 'view'):
+                  'position', 'signals', 'standards', 'view',
+                  'next_day_plan', 'trend', 'structure', 'sequence',
+                  'decision', 'explanation'):
             assert k in r, f"missing field: {k}"
 
+        assert r['action'] in ('BUY', 'SELL', 'HOLD', 'WAIT')
+        assert 0.0 <= r['weight'] <= 1.0
+        assert 'state' in r['trend']
+        assert 'final_target_position' in r['decision']
+
         # 决策块
-        assert r['action'] in ('BUY', 'SELL', 'HOLD')
         assert isinstance(r['weight'], (int, float))
         assert r['confidence'] in ('trend', 'core', 'resonance')
 

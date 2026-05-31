@@ -2,7 +2,9 @@
 
 ## 1. 概述
 
-StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化分析与任务调度系统，支持 A 股 / 港股 / 美股。数据以 **Parquet 列存格式** 存储在 **云对象存储 (S3 / OSS)** 上，通过 DuckDB 的 httpfs 扩展远程读写，实现 **存算分离** 和无状态部署。
+StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化分析、前端控制台与任务调度系统，支持 A 股 / 港股 / 美股。数据以 **Parquet 列存格式** 存储在 **云对象存储 (S3 / OSS)** 上，通过 DuckDB 的 httpfs 扩展远程读写，实现 **存算分离** 和无状态部署。
+
+量化决策采用「趋势为王、结构修边、序列纪律」的日频三层状态机。系统每天收盘后生成一次次日交易计划，真实下单比例只来自目标仓位与当前仓位的差值。
 
 ## 2. 架构总览
 
@@ -12,6 +14,12 @@ StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化
 │  Flask   │◄──────│  APScheduler │
 └────┬─────┘       └──────┬──────┘
      │                    │
+┌────▼────────────────────▼──────────┐
+│        Web / API 层                 │
+│  templates/index.html + static      │
+│  api/routes.py                      │
+└────┬───────────────────────────────┘
+     │
 ┌────▼────────────────────▼──────────┐
 │           Service 层                │
 │  workflow_service / stock_service   │
@@ -47,7 +55,7 @@ StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化
 
 ### 3.2 API 层 — app/api/routes.py
 
-Flask Blueprint `api_bp`，挂载 `/api` 前缀。详见 [api.md](api.md)。
+Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前端控制台，静态资源由 Flask 的 `static` 目录提供。详见 [api.md](api.md)。
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
@@ -60,6 +68,13 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。详见 [api.md](api.md)。
 | `/workflows` | GET | 查看所有工作流 |
 | `/workflows/<id>` | DELETE | 删除工作流 |
 | `/health` | GET | 健康检查 |
+
+### 3.2.1 前端控制台 — templates / static
+
+- `app/templates/index.html`：单页控制台入口，访问 `/`。
+- `app/static/css/app.css`：页面布局与视觉样式。
+- `app/static/js/app.js`：直接调用现有 API，支持标的分析、注册工作流、查看三层次日计划、集成图表和原始 JSON。
+- 前端不引入 Node/Vite/Webpack 等构建链，部署方式与原 Flask 服务一致。
 
 ### 3.3 Service 层
 
@@ -87,12 +102,12 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。详见 [api.md](api.md)。
 `analyze_stock(stock_input, interval='daily')`：
 1. 解析输入 → 读 `*_5min` → `resample` 出日线 + 60/90/120
 2. `DecisionEngine.summary_integrated(df_daily, intraday)`：趋势与序列只看日线，结构看 60/90/120 并合并
-3. `_enrich_resonance_integrated`：统计 60/90/120 共振
+3. `_enrich_resonance_integrated`：使用已经通过交易确认过滤的计划结果输出 60/90/120 共振
 4. 返回 `interval: integrated`
 
 #### resample.py
 
-`resample_ohlcv(df_5m, target_interval)`：按交易日分组、按 K 线序号切桶。聚合：`Open=first, High=max, Low=min, Close=last, Volume=sum`。桶内不足时输出尾巴 K 线。
+`resample_ohlcv(df_5m, target_interval)`：按交易日分组、按 K 线序号切桶。聚合：`Open=first, High=max, Low=min, Close=last, Volume=sum`。桶内不足时输出尾巴 K 线并标记 `partial_bar`。默认交易确认会过滤 90min 的 partial 尾巴。
 
 #### chart_service.py
 
@@ -102,7 +117,11 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。详见 [api.md](api.md)。
 
 ### 3.4 Algos 层 — 量化算法
 
-位于 `app/algos/`，四个模块对应 [algorithm.md](algorithm.md) 的四级体系。
+位于 `app/algos/`，核心模块对应 [algorithm.md](algorithm.md) 的三层状态机。
+
+#### config.py — 策略配置与枚举
+
+`StrategyConfig` 集中管理趋势通道、ATR、自适应 offset、过渡衰减、结构有效期、90min partial-bar 交易过滤、次日高开/低开执行保护等配置。`TrendState` / `StructureBias` / `Action` / `ConfidenceLabel` 用 enum 表达核心状态，减少魔法字符串。
 
 #### trend.py — 趋势量化
 
@@ -110,7 +129,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。详见 [api.md](api.md)。
 
 通道公式：`EMA(RollingMax(High, N), N) × (1+offset)` / `EMA(RollingMin(Low, N), N) × (1−offset)`
 
-仓位：满仓(10.0) / 重仓(6.0) / 轻仓(4.0) / 空仓(0.0)，信号执行时点 `T+1 Open`。
+趋势状态：`UP_STRONG` / `UP_PULLBACK` / `RANGE` / `DOWN_REBOUND` / `DOWN_STRONG` / `UNKNOWN`。趋势层输出 `base_target_position`、`position_cap`、`position_floor`、`trend_reason` 和质量指标。突破判定使用 T 日收盘价对比 T-1 已确定轨线，避免未来函数。
 
 #### structure.py — 结构量化
 
@@ -119,24 +138,39 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。详见 [api.md](api.md)。
 状态机：`normal → top_divergence → top_75 → top_100 → reset → normal`（底部对称）。关键修复：peak_dif 逐根更新、100% 后立即 reset、带符号相对阈值比较、75% 需连续 K=2 根确认。
 
 多周期共振只在 60/90/120min 上统计，`resonance.level` 为 1.0 / 1.5 / 2.0。
+90min 尾部不足 18 根 5min 的 K 线标记为 `partial_bar`，默认仅展示、不参与交易确认。
 
 #### sequence.py — 序列量化
 
 `NineSequence(effective_horizon=5)`：高九（连续 9 根 `Close[i] > Close[i-4]`）、低九（对称）。有效期内价格突破 9 区间极值则立即失效，超 `H=5` 根自动失效。仅做 Setup 9，不做 Countdown 13。
 
+序列层默认只输出执行纪律：高九对应 `NO_CHASE`，低九对应 `NO_PANIC_SELL`。`is_near_historical_extreme` 只作为 probe / warning 字段，不参与真实交易动作。
+
+#### integrated_decision.py — 三层计划整合
+
+`build_daily_trading_plan()` 是新的核心入口：趋势定战略仓位，结构在 cap/floor 内修边，序列输出执行规则，最后生成 `DailyTradingPlan`。
+
+`final_target_position = clamp(base_target_position + structure_adjustment, position_floor, position_cap)`。
+
+`order_weight = clamp(abs(final_target_position - actual_position) / 10, 0, 1)`。结构与序列只影响修边、提示、展示强度，不得无上限放大真实 `weight`。
+
 #### decision.py — 决策引擎
 
-`DecisionEngine` 三级优先级：
+`DecisionEngine` 三层职责：
 
 | 级别 | 模块 | 职责 |
 |------|------|------|
-| 第一级 | TrendChannel | 仓位跃迁 → 主 BS 点 |
-| 第二级 | MACDStructure（3 周期并行 + 共振） | 修饰权重，升级 confidence = core |
-| 第三级 | NineSequence | 与结构共振时增强 weight，升级 confidence = resonance |
+| 第一级 | TrendChannel | 战略方向、base_target_position、cap/floor |
+| 第二级 | MACDStructure（3 周期并行 + 共振） | 仅在趋势边界内修边，输出 adjustment/warnings/resonance |
+| 第三级 | NineSequence | 执行纪律，不直接改变 final_target_position |
 
-核心规则：`position ≥ 6` 不做空、`position ≤ 4` 不做多，避免仓位 4/6 同时触发的矛盾。
+核心规则：`final_target = clamp(base_target + structure_adjustment, floor, cap)`；`action` 由 `actual_position` 与 `final_target` 的差值推导。`weight = order_weight = |final_target - actual_position| / 10`，结构/序列不得乘大真实下单比例；`signal_strength` 仅用于展示和排序。
 
 `summary_integrated(df_daily, intraday)` 返回：`decision`（action/weight/confidence/execute_at）、`signals`（structure/sequence/resonance）、`standards`（trend 四轨 + structure 阈值）、`view`（人话态势 + 触发价位）。
+
+### 3.4.1 Schema 层 — app/schemas/decision.py
+
+`DailyTradingPlan` / `TrendContext` / `StructureContext` / `SequenceContext` / `DecisionContext` 使用 dataclass 表达对外嵌套结构。API 旧字段继续保留，新字段通过 `next_day_plan` 以及顶层 `trend` / `structure` / `sequence` / `decision` / `explanation` 暴露。
 
 ### 3.5 Model 层 — app/models/database.py
 
@@ -221,9 +255,9 @@ POST /api/stock/decision {"stock": "阿里巴巴", "interval": "daily"}
 | 结构状态机 100% 后立即 reset | 避免单股生命周期只产一次信号 |
 | 钝化区间 DIF 极值逐根更新 | 修复 DIF 在两峰之间漏检 |
 | 趋势通道 EMA(RollingMax(High,N), N) | 与多空通道原意一致；直接 EMA(High) 退化为普通均线 |
-| 仓位跃迁作主 BS，结构/序列作权重 | BS 点可量化、可下单；区分 trend/core/resonance 三档置信度 |
-| 决策阈值 `≥ 6` / `≤ 4` | 修正历史阈值在仓位 4/6 时的逻辑矛盾 |
-| 信号 T+1 开盘撮合 | 趋势用 T 日收盘判定，避免未来函数 |
+| 趋势定仓、结构修边、序列纪律 | 避免结构/序列反客为主；真实 `weight` 只来自仓位差，`signal_strength` 仅展示 |
+| cap/floor 边界内修边 | 结构不能反转趋势方向，避免仓位 4/6 附近的多空逻辑冲突 |
+| 信号 T+1 计划执行 | 趋势用 T 日收盘判定，下一工作日执行，避免未来函数 |
 
 ## 6. 项目结构
 
@@ -242,12 +276,21 @@ StockQuantAssisant/
 │   ├── __init__.py
 │   ├── config.py
 │   ├── algos/
+│   │   ├── config.py
 │   │   ├── trend.py
 │   │   ├── structure.py
 │   │   ├── sequence.py
+│   │   ├── integrated_decision.py
+│   │   └── decision.py
+│   ├── schemas/
 │   │   └── decision.py
 │   ├── api/
 │   │   └── routes.py
+│   ├── templates/
+│   │   └── index.html
+│   ├── static/
+│   │   ├── css/app.css
+│   │   └── js/app.js
 │   ├── models/
 │   │   └── database.py
 │   ├── scheduler/
@@ -265,10 +308,15 @@ StockQuantAssisant/
 │   ├── test_api.py
 │   ├── test_chart.py
 │   ├── test_database.py
+│   ├── test_integrated_decision.py
 │   ├── test_integration.py
 │   ├── test_parquet_store.py
 │   ├── test_resample.py
+│   ├── test_resample_partial_bar.py
+│   ├── test_sequence_execution_rules.py
 │   ├── test_stock_service.py
+│   ├── test_structure_boundaries.py
+│   ├── test_trend_no_lookahead.py
 │   └── test_workflow_service.py
 └── e2e/
     ├── run.py
@@ -277,7 +325,7 @@ StockQuantAssisant/
 
 ## 7. 测试
 
-基于 pytest，共 212 个测试函数覆盖：股票识别、Parquet CRUD、工作流管理、API 端点、三个量化算法、决策引擎、多周期合成、集成流程。
+基于 pytest，共 232 个测试函数覆盖：股票识别、Parquet CRUD、工作流管理、API 端点、前端首页、三个量化算法、三层决策引擎、多周期合成、90min partial-bar 过滤和集成流程。
 
 ```bash
 pytest tests/ -v                        # 单元测试

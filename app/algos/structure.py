@@ -15,10 +15,22 @@
 from __future__ import annotations
 
 import math
-from typing import Optional
+from datetime import timedelta
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+from app.algos.config import (
+    DEFAULT_CONFIG,
+    STRUCTURE_INTERVAL_ORDER,
+    STRUCTURE_PERIOD_PRIORITY,
+    STRUCTURE_RESONANCE_INTERVALS,
+    StrategyConfig,
+    StructureBias,
+    TrendState,
+    _STRUCTURE_ENUM_SCORE,
+)
 
 
 def strictly_greater(a: float, b: float, eps: float = 0.001) -> bool:
@@ -112,7 +124,13 @@ class MACDStructure:
             result[col] = False
         result['top_structure_level'] = 0.0
         result['bottom_structure_level'] = 0.0
-        result['structure_effective_until'] = pd.NaT
+        result['structure_effective_until'] = pd.Series([pd.NaT] * n, index=result.index, dtype='object')
+        result['top_structure_active_event'] = 'none'
+        result['bottom_structure_active_event'] = 'none'
+        result['top_structure_event_at'] = pd.Series([pd.NaT] * n, index=result.index, dtype='object')
+        result['bottom_structure_event_at'] = pd.Series([pd.NaT] * n, index=result.index, dtype='object')
+        result['top_structure_effective_until'] = pd.Series([pd.NaT] * n, index=result.index, dtype='object')
+        result['bottom_structure_effective_until'] = pd.Series([pd.NaT] * n, index=result.index, dtype='object')
 
         # 数据不够直接返回
         min_bars = max(self.slow + self.signal + 2, 2)
@@ -123,6 +141,7 @@ class MACDStructure:
         L = result['Low'].values
         DIF = result['dif'].values
         DEA = result['dea'].values
+        idx = result.index
 
         # ------------------------------------------------ 顶部状态机
         top_state = 'normal'
@@ -131,6 +150,8 @@ class MACDStructure:
         top_div_start: Optional[int] = None
         top_decline_run = 0
         top_active_until = -1  # 截止 K 线 idx（含）
+        top_active_event = 'none'
+        top_active_event_at: Optional[int] = None
 
         # ------------------------------------------------ 底部状态机
         bot_state = 'normal'
@@ -139,6 +160,8 @@ class MACDStructure:
         bot_div_start: Optional[int] = None
         bot_rise_run = 0
         bot_active_until = -1
+        bot_active_event = 'none'
+        bot_active_event_at: Optional[int] = None
 
         eff_until_idx = [None] * n  # 记录每根 K 线在该时刻的有效期截止 idx
 
@@ -148,8 +171,16 @@ class MACDStructure:
                 # 仍要更新 active 列
                 if i <= top_active_until:
                     result.at[result.index[i], 'top_structure_active'] = True
+                    result.at[result.index[i], 'top_structure_active_event'] = top_active_event
+                    if top_active_event_at is not None:
+                        result.at[result.index[i], 'top_structure_event_at'] = idx[top_active_event_at]
+                    result.at[result.index[i], 'top_structure_effective_until'] = idx[min(top_active_until, n - 1)]
                 if i <= bot_active_until:
                     result.at[result.index[i], 'bottom_structure_active'] = True
+                    result.at[result.index[i], 'bottom_structure_active_event'] = bot_active_event
+                    if bot_active_event_at is not None:
+                        result.at[result.index[i], 'bottom_structure_event_at'] = idx[bot_active_event_at]
+                    result.at[result.index[i], 'bottom_structure_effective_until'] = idx[min(bot_active_until, n - 1)]
                 continue
             prev_d = DIF[i - 1] if i > 0 else float('nan')
             prev_a = DEA[i - 1] if i > 0 else float('nan')
@@ -163,6 +194,11 @@ class MACDStructure:
              top_decline_run, top_fired_at) = top_event
             if top_fired_at is not None:
                 top_active_until = max(top_active_until, i + self.effective_horizon)
+                top_active_event = (
+                    'top_100' if bool(result.at[result.index[i], 'top_structure_100'])
+                    else 'top_75'
+                )
+                top_active_event_at = i
 
             # ---------------- 底部逻辑 ----------------
             bot_event = self._step_bottom(
@@ -173,12 +209,25 @@ class MACDStructure:
              bot_rise_run, bot_fired_at) = bot_event
             if bot_fired_at is not None:
                 bot_active_until = max(bot_active_until, i + self.effective_horizon)
+                bot_active_event = (
+                    'bottom_100' if bool(result.at[result.index[i], 'bottom_structure_100'])
+                    else 'bottom_75'
+                )
+                bot_active_event_at = i
 
             # ---------------- active 与有效期 ----------------
             if i <= top_active_until:
                 result.at[result.index[i], 'top_structure_active'] = True
+                result.at[result.index[i], 'top_structure_active_event'] = top_active_event
+                if top_active_event_at is not None:
+                    result.at[result.index[i], 'top_structure_event_at'] = idx[top_active_event_at]
+                result.at[result.index[i], 'top_structure_effective_until'] = idx[min(top_active_until, n - 1)]
             if i <= bot_active_until:
                 result.at[result.index[i], 'bottom_structure_active'] = True
+                result.at[result.index[i], 'bottom_structure_active_event'] = bot_active_event
+                if bot_active_event_at is not None:
+                    result.at[result.index[i], 'bottom_structure_event_at'] = idx[bot_active_event_at]
+                result.at[result.index[i], 'bottom_structure_effective_until'] = idx[min(bot_active_until, n - 1)]
 
             # 记录任一方向最远的有效期截止
             far_until = max(top_active_until, bot_active_until)
@@ -186,7 +235,6 @@ class MACDStructure:
                 eff_until_idx[i] = min(far_until, n - 1)
 
         # 把 effective_until 用时间戳填充
-        idx = result.index
         eff_until_series = []
         for j in eff_until_idx:
             if j is None:
@@ -388,3 +436,261 @@ class MACDStructure:
             result['macd_dif_turn_price'] = round(float((dif_cur - A) / B), 4)
 
         return result
+
+
+def _structure_enum_from_row(row: pd.Series) -> str:
+    if bool(row.get('top_structure_100')):
+        return 'top_100'
+    if bool(row.get('top_structure_75')):
+        return 'top_75'
+    if bool(row.get('bottom_structure_100')):
+        return 'bottom_100'
+    if bool(row.get('bottom_structure_75')):
+        return 'bottom_75'
+    top_active = _top_structure_enum_from_row(row)
+    bot_active = _bottom_structure_enum_from_row(row)
+    candidates = [e for e in (top_active, bot_active) if e != 'none']
+    if candidates:
+        candidates.sort(key=lambda e: _STRUCTURE_ENUM_SCORE.get(e, 0), reverse=True)
+        return candidates[0]
+    return 'none'
+
+
+def _event_direction(enum_val: str) -> Optional[str]:
+    if enum_val.startswith('top'):
+        return 'top'
+    if enum_val.startswith('bottom'):
+        return 'bottom'
+    return None
+
+
+def _top_structure_enum_from_row(row: pd.Series) -> str:
+    """读取顶部结构事件；若当前非触发当根，则使用 active 期内保留的事件类型。"""
+    if bool(row.get('top_structure_100')):
+        return 'top_100'
+    if bool(row.get('top_structure_75')):
+        return 'top_75'
+    active_event = row.get('top_structure_active_event')
+    if bool(row.get('top_structure_active')) and active_event in ('top_100', 'top_75'):
+        return str(active_event)
+    return 'none'
+
+
+def _bottom_structure_enum_from_row(row: pd.Series) -> str:
+    """读取底部结构事件；若当前非触发当根，则使用 active 期内保留的事件类型。"""
+    if bool(row.get('bottom_structure_100')):
+        return 'bottom_100'
+    if bool(row.get('bottom_structure_75')):
+        return 'bottom_75'
+    active_event = row.get('bottom_structure_active_event')
+    if bool(row.get('bottom_structure_active')) and active_event in ('bottom_100', 'bottom_75'):
+        return str(active_event)
+    return 'none'
+
+
+def _trading_valid_until(
+    event_ts: pd.Timestamp,
+    period: str,
+    config: StrategyConfig,
+) -> pd.Timestamp:
+    """按交易日天数估算结构对次日计划的有效截止（日频决策用）。"""
+    days = config.structure_valid_days_by_period.get(period, 1)
+    return pd.Timestamp(event_ts) + timedelta(days=days)
+
+
+def aggregate_structure_context(
+    struct_by_period: Dict[str, pd.Series],
+    as_of: pd.Timestamp,
+    config: StrategyConfig = DEFAULT_CONFIG,
+) -> dict:
+    """多周期结构整合：周期越大优先级越高（daily > 120 > 90 > 60）。
+
+    仅统计 trading_valid_until >= as_of 的 active 结构。可用于交易确认。
+    """
+    active_periods: List[str] = []
+    top_events: List[Tuple[str, str, int]] = []
+    bot_events: List[Tuple[str, str, int]] = []
+
+    for period in STRUCTURE_INTERVAL_ORDER:
+        row = struct_by_period.get(period)
+        if row is None:
+            continue
+        top_enum = _top_structure_enum_from_row(row)
+        bot_enum = _bottom_structure_enum_from_row(row)
+        top_a = top_enum != 'none' and bool(row.get('top_structure_active'))
+        bot_a = bot_enum != 'none' and bool(row.get('bottom_structure_active'))
+
+        top_until = row.get('top_trading_valid_until', row.get('trading_valid_until'))
+        bot_until = row.get('bottom_trading_valid_until', row.get('trading_valid_until'))
+        if top_a and top_until is not None and pd.notna(top_until):
+            top_a = pd.Timestamp(top_until) >= pd.Timestamp(as_of)
+        if bot_a and bot_until is not None and pd.notna(bot_until):
+            bot_a = pd.Timestamp(bot_until) >= pd.Timestamp(as_of)
+
+        if not top_a and not bot_a:
+            continue
+        active_periods.append(period)
+        if top_a:
+            top_events.append((period, top_enum, _STRUCTURE_ENUM_SCORE[top_enum]))
+        if bot_a:
+            bot_events.append((period, bot_enum, _STRUCTURE_ENUM_SCORE[bot_enum]))
+
+    def _pick_best(events: List[Tuple[str, str, int]]) -> Tuple[str, str]:
+        if not events:
+            return 'none', ''
+        events.sort(
+            key=lambda x: (x[2], STRUCTURE_PERIOD_PRIORITY.get(x[0], 0)),
+            reverse=True,
+        )
+        return events[0][1], events[0][0]
+
+    strongest_top, _ = _pick_best(top_events)
+    strongest_bot, _ = _pick_best(bot_events)
+
+    if strongest_top != 'none' and strongest_bot != 'none':
+        strongest_event = f'conflict:{strongest_top}/{strongest_bot}'
+    elif strongest_top != 'none':
+        strongest_event = strongest_top
+    elif strongest_bot != 'none':
+        strongest_event = strongest_bot
+    else:
+        strongest_event = 'none'
+
+    highest_tf = 'none'
+    highest_period = ''
+    best_pri = -1
+    for period in STRUCTURE_INTERVAL_ORDER:
+        if period not in active_periods:
+            continue
+        row = struct_by_period.get(period)
+        if row is None:
+            continue
+        candidates = [
+            _top_structure_enum_from_row(row),
+            _bottom_structure_enum_from_row(row),
+        ]
+        candidates = [en for en in candidates if en != 'none']
+        if not candidates:
+            continue
+        candidates.sort(key=lambda en: _STRUCTURE_ENUM_SCORE.get(en, 0), reverse=True)
+        en = candidates[0]
+        pri = STRUCTURE_PERIOD_PRIORITY.get(period, 0)
+        if pri > best_pri:
+            best_pri = pri
+            highest_tf = en
+            highest_period = period
+    highest_timeframe_event = f'{highest_period}:{highest_tf}' if highest_period else 'none'
+
+    res_periods = [p for p in STRUCTURE_RESONANCE_INTERVALS if p in active_periods]
+    k = len(res_periods)
+    resonance_weight = 2.0 if k >= 3 else (1.5 if k == 2 else (1.0 if k == 1 else 0.0))
+
+    return {
+        'active_periods': active_periods,
+        'strongest_event': strongest_event,
+        'highest_timeframe_event': highest_timeframe_event,
+        'resonance_count': k,
+        'resonance_weight': resonance_weight,
+        'resonance_periods': res_periods,
+        'top_active': len(top_events) > 0,
+        'bottom_active': len(bot_events) > 0,
+        'has_conflict': strongest_top != 'none' and strongest_bot != 'none',
+    }
+
+
+def compute_structure_adjustment(
+    trend_state: str,
+    struct_ctx: dict,
+    config: StrategyConfig = DEFAULT_CONFIG,
+) -> Tuple[int, StructureBias, List[str]]:
+    """结构层修边：仅在趋势 cap/floor 内微调，不反转趋势方向。"""
+    warnings: List[str] = []
+
+    if struct_ctx.get('has_conflict'):
+        return 0, StructureBias.CONFLICT, ['CONFLICT_WARNING']
+
+    top_active = struct_ctx.get('top_active', False)
+    bot_active = struct_ctx.get('bottom_active', False)
+    ts = trend_state
+    max_adj = config.max_structure_adjustment
+
+    if not top_active and not bot_active:
+        return 0, StructureBias.NEUTRAL, warnings
+
+    adj = 0
+
+    if top_active:
+        if ts == TrendState.UP_STRONG.value:
+            adj = -min(2, max_adj)
+            warnings.extend(['NO_CHASE', 'TRIM_ALLOWED'])
+        elif ts == TrendState.UP_PULLBACK.value:
+            adj = -1
+            warnings.append('NO_CHASE')
+        elif ts in (TrendState.DOWN_REBOUND.value, TrendState.DOWN_STRONG.value):
+            adj = -1
+            warnings.append('SELL_PRIORITY')
+        elif ts == TrendState.RANGE.value:
+            adj = -1
+            warnings.append('RANGE_UPPER_EDGE')
+
+    if bot_active:
+        if ts in (TrendState.UP_STRONG.value, TrendState.UP_PULLBACK.value):
+            bot_adj = min(2, max_adj)
+            adj = max(adj, bot_adj) if adj > 0 else bot_adj
+            if ts == TrendState.UP_PULLBACK.value:
+                warnings.append('PULLBACK_BUY_CANDIDATE')
+        elif ts == TrendState.DOWN_STRONG.value:
+            warnings.extend(['NO_PANIC_SELL', 'BOTTOM_WATCH'])
+        elif ts == TrendState.DOWN_REBOUND.value:
+            bot_adj = min(1, max_adj)
+            adj = max(adj, bot_adj) if adj > 0 else bot_adj
+
+    adj = int(np.clip(adj, -max_adj, max_adj))
+
+    if top_active and bot_active:
+        return 0, StructureBias.CONFLICT, ['CONFLICT_WARNING']
+
+    if adj > 0:
+        bias = StructureBias.BULLISH_EDGE
+    elif adj < 0:
+        bias = StructureBias.BEARISH_EDGE
+    else:
+        bias = StructureBias.NEUTRAL
+
+    return adj, bias, warnings
+
+
+def enrich_structure_row_with_trading_validity(
+    row: pd.Series,
+    period: str,
+    config: StrategyConfig = DEFAULT_CONFIG,
+) -> pd.Series:
+    """为结构末行补充 trading_valid_until（日频决策用）。"""
+    row = row.copy()
+    fallback_idx = row.name
+
+    def _event_ts(field: str) -> Optional[pd.Timestamp]:
+        v = row.get(field)
+        if v is not None and pd.notna(v):
+            return pd.Timestamp(v)
+        if fallback_idx is not None:
+            return pd.Timestamp(fallback_idx)
+        return None
+
+    valid_untils = []
+    if bool(row.get('top_structure_active')):
+        ts = _event_ts('top_structure_event_at')
+        if ts is not None:
+            row['top_trading_valid_until'] = _trading_valid_until(ts, period, config)
+            valid_untils.append(row['top_trading_valid_until'])
+    if bool(row.get('bottom_structure_active')):
+        ts = _event_ts('bottom_structure_event_at')
+        if ts is not None:
+            row['bottom_trading_valid_until'] = _trading_valid_until(ts, period, config)
+            valid_untils.append(row['bottom_trading_valid_until'])
+
+    if valid_untils:
+        row['trading_valid_until'] = max(valid_untils)
+    elif fallback_idx is not None:
+        row['trading_valid_until'] = _trading_valid_until(pd.Timestamp(fallback_idx), period, config)
+    return row

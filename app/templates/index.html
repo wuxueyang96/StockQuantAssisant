@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StockQuant 控制台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="brand">StockQuant</div>
+        <div class="subtitle">日频量化决策控制台</div>
+      </div>
+      <div class="status" id="apiStatus">
+        <span class="status-dot"></span>
+        <span>API</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar">
+        <form class="query-form" id="decisionForm">
+          <label for="stockInput">标的</label>
+          <div class="input-row">
+            <input id="stockInput" name="stock" type="text" value="000001" autocomplete="off" required>
+            <button type="submit" class="primary-btn">分析</button>
+          </div>
+          <div class="button-row">
+            <button type="button" id="registerBtn">注册</button>
+            <button type="button" id="chartBtn">图表</button>
+          </div>
+        </form>
+
+        <section class="metric-grid" aria-label="核心指标">
+          <div class="metric">
+            <span>动作</span>
+            <strong id="metricAction">WAIT</strong>
+          </div>
+          <div class="metric">
+            <span>目标仓位</span>
+            <strong id="metricTarget">--</strong>
+          </div>
+          <div class="metric">
+            <span>调仓比例</span>
+            <strong id="metricWeight">--</strong>
+          </div>
+          <div class="metric">
+            <span>收盘价</span>
+            <strong id="metricClose">--</strong>
+          </div>
+        </section>
+
+        <section class="watchlist">
+          <div class="section-title">代码映射</div>
+          <div id="watchlist" class="watchlist-items"></div>
+        </section>
+      </aside>
+
+      <section class="content">
+        <div class="tabs" role="tablist">
+          <button class="tab is-active" data-tab="plan" type="button">计划</button>
+          <button class="tab" data-tab="chart" type="button">图表</button>
+          <button class="tab" data-tab="json" type="button">JSON</button>
+        </div>
+
+        <div class="notice" id="message" hidden></div>
+
+        <section class="tab-panel is-active" id="panel-plan">
+          <div class="decision-strip">
+            <div>
+              <span class="eyebrow">Next Day Plan</span>
+              <h1 id="planTitle">等待分析</h1>
+            </div>
+            <span class="action-badge" id="actionBadge">WAIT</span>
+          </div>
+
+          <div class="summary-band">
+            <div>
+              <span>执行日</span>
+              <strong id="executeDate">--</strong>
+            </div>
+            <div>
+              <span>当前仓位</span>
+              <strong id="actualPosition">--</strong>
+            </div>
+            <div>
+              <span>订单差值</span>
+              <strong id="orderDelta">--</strong>
+            </div>
+            <div>
+              <span>置信标签</span>
+              <strong id="confidenceLabel">--</strong>
+            </div>
+          </div>
+
+          <div class="split-layout">
+            <section class="panel">
+              <div class="section-title">趋势层</div>
+              <div class="kv-list" id="trendList"></div>
+            </section>
+            <section class="panel">
+              <div class="section-title">结构层</div>
+              <div class="kv-list" id="structureList"></div>
+            </section>
+            <section class="panel">
+              <div class="section-title">序列层</div>
+              <div class="kv-list" id="sequenceList"></div>
+            </section>
+          </div>
+
+          <section class="panel execution-panel">
+            <div class="section-title">执行纪律</div>
+            <div class="rule-block">
+              <span>原则</span>
+              <p id="principle">--</p>
+            </div>
+            <div class="rule-block">
+              <span>禁止动作</span>
+              <p id="forbiddenActions">--</p>
+            </div>
+            <div class="rule-block">
+              <span>失效条件</span>
+              <p id="invalidation">--</p>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="section-title">解释</div>
+            <ol class="explanation" id="explanation"></ol>
+          </section>
+        </section>
+
+        <section class="tab-panel chart-panel" id="panel-chart">
+          <div class="chart-toolbar">
+            <div>
+              <span class="eyebrow">Integrated Chart</span>
+              <h2 id="chartTitle">行情图</h2>
+            </div>
+            <label>
+              <span>Bars</span>
+              <input id="barsInput" type="number" min="20" max="500" value="90">
+            </label>
+          </div>
+          <div class="chart-frame">
+            <img id="chartImage" alt="集成行情图">
+            <div class="empty-chart" id="chartEmpty">暂无图表</div>
+          </div>
+        </section>
+
+        <section class="tab-panel" id="panel-json">
+          <pre id="jsonOutput">{}</pre>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+</body>
+</html>

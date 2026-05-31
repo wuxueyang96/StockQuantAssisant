@@ -65,17 +65,39 @@ def resample_ohlcv(df: pd.DataFrame, target_interval: str) -> pd.DataFrame:
             chunks = [day_df]
         else:
             chunks = [day_df.iloc[i:i + bars] for i in range(0, n, bars)]
+        expected = bars if bars is not None else n
         for chunk in chunks:
             if len(chunk) == 0:
                 continue
+            partial = (bars is not None) and (len(chunk) < expected)
             rows.append({
                 'Open': float(chunk['Open'].iloc[0]),
                 'High': float(chunk['High'].max()),
                 'Low': float(chunk['Low'].min()),
                 'Close': float(chunk['Close'].iloc[-1]),
                 'Volume': int(chunk['Volume'].sum()) if 'Volume' in chunk.columns else 0,
+                'partial_bar': partial,
             })
             timestamps.append(chunk.index[0])
 
     out = pd.DataFrame(rows, index=pd.Index(timestamps, name=df.index.name))
     return out
+
+
+def drop_partial_bars_for_trade(
+    df: pd.DataFrame,
+    period: str,
+    config=None,
+) -> pd.DataFrame:
+    """剔除不参与交易确认的 partial K 线（默认 90min 末根尾巴）。
+
+    展示用数据勿调用此函数；仅结构/决策确认路径使用。
+    """
+    from app.algos.config import DEFAULT_CONFIG
+
+    cfg = config or DEFAULT_CONFIG
+    if df is None or df.empty or 'partial_bar' not in df.columns:
+        return df
+    if period == '90min' and not cfg.allow_partial_90m_for_trade:
+        return df.loc[~df['partial_bar'].astype(bool)].copy()
+    return df

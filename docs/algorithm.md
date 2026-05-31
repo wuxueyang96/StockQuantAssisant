@@ -1,6 +1,6 @@
 ### 一、趋势量化算法（双均线通道）
 
-**目标**：用两条通道客观定义趋势方向，并自动生成"目标仓位"标准。**目标仓位的跃迁即为主 BS 点的来源**（见 §四）。
+**目标**：用两条通道客观定义趋势方向，并自动生成战略仓位标准。趋势层是唯一可以决定大幅仓位变化的层级，输出 `base_target_position`、`position_cap`、`position_floor` 和 `trend_state`。
 
 **核心原则**：趋势只看本周期收盘价（默认日线）。一切尽在收盘，收盘价是趋势判定的唯一标准。**T 日收盘后判定，T+1 日按目标仓位执行**，以避免未来函数。
 
@@ -24,19 +24,24 @@
 
 #### 2. 趋势判断与仓位量化
 
-每个交易日**收盘后**，根据最新收盘价 `C` 与四条轨线的关系，自动计算目标仓位：
+每个交易日**收盘后**，用 T 日收盘价 `Close_T` 与 **T-1 已经确定的四条轨线**比较。禁止用 T 日 High/Low 参与生成的 `channel_T` 来判断 T 日是否突破自身通道；`channel_T` 只作为状态更新和 T+1 参考线。
 
-| 情形 | 条件 | 目标仓位 | 含义 |
-|------|------|---------|------|
-| 一 | `C > 短上轨` 且 `C > 长上轨` | **10**（满仓） | 上升趋势强劲 |
-| 二 | `C < 短下轨` 且 `C < 长下轨` | **0**（空仓）  | 下降趋势明显 |
-| 三 | `C < 短下轨` 且 `C > 长上轨` | **6**（重仓）  | 长期向上、短期回调 |
-| 四 | `C > 短上轨` 且 `C < 长上轨` | **4**（轻仓）  | 短期反弹、长期向下 |
-| 五 | 其他过渡状态 | **维持上一次有效仓位** | 趋势未变 |
+| trend_state | 条件（均使用 T-1 轨线） | base | cap | floor | 含义 |
+|-------------|--------------------------|------|-----|-------|------|
+| `UP_STRONG` | `Close_T > short_upper_{T-1}` 且 `Close_T > long_upper_{T-1}` | 10 | 10 | 6 | 强上升趋势 |
+| `DOWN_STRONG` | `Close_T < short_lower_{T-1}` 且 `Close_T < long_lower_{T-1}` | 0 | 0 | 0 | 强下降趋势 |
+| `UP_PULLBACK` | `Close_T < short_lower_{T-1}` 且 `Close_T > long_upper_{T-1}` | 6 | 8 | 4 | 上升趋势中的短期回调 |
+| `DOWN_REBOUND` | `Close_T > short_upper_{T-1}` 且 `Close_T < long_upper_{T-1}` | 4 | 4 | 0 | 下降趋势中的短期反弹 |
+| `RANGE` | 其他可判定状态 | 继承或衰减至 `range_target_position`（默认 4） | 4 | 0 | 震荡 / 无明确趋势 |
+| `UNKNOWN` | 冷启动或数据不足 | — | — | — | 不产生交易动作 |
 
 **冷启动**：首次有效仓位形成之前，`position = NaN`，不产生 BS 点。
 
 **突破有效性**：轨线已含 offset 缓冲，因此默认仅要求收盘价跨越轨线即可视为有效突破，不再额外要求"连续 N 日"。
+
+**趋势质量指标**：趋势层同时输出 `short_mid_slope`、`long_mid_slope`、`channel_width_pct`、`atr_pct`。配置项预留自适应 offset：`offset = adaptive_offset_k × ATR(N) / Close`，默认仍使用固定 `fixed_offset = 0.03`。
+
+**过渡衰减**：`RANGE` 不会永久黏住旧仓位。连续 `transition_decay_days`（默认 3）日处于震荡/过渡后，基础仓位衰减至 `range_target_position`。
 
 #### 3. 信号执行时点
 
@@ -124,7 +129,7 @@ strictly_greater(a, b, eps = 0.001):
 
 #### 4. 结构级别（单周期内）
 
-每个 100% 完成的结构记录两个维度，仅用于排序与权重，不作硬阈值：
+每个 100% 完成的结构记录两个维度，仅用于排序、解释与展示强度，不作硬阈值，不直接放大真实下单比例：
 
 *   `duration`：从首次钝化出现到 100% 完成所经过的 K 线根数。越长，趋势衰竭酝酿越充分。
 *   `decel`：钝化区间内 MACD 柱高度是否单调递减（顶部连续递减红柱，底部连续递减绿柱）。把柱高按时间均分 3 段，若后两段均值依次低于第一段则记 1，否则记 0。
@@ -138,11 +143,13 @@ strictly_greater(a, b, eps = 0.001):
 | 周期 | 桶大小（5min 根数） | A 股一日产出 |
 |------|-------------------|--------------|
 | 60min | 12 | 4 |
-| 90min | 18 | 3（含 60min 尾巴） |
+| 90min | 18 | 3（最后一根为 60min 尾巴，标记 `partial_bar=true`） |
 | 120min | 24 | 2 |
 | daily | 全天 | 1 |
 
 合成 OHLCV 规则：`Open = 首根 Open`、`High = max(High)`、`Low = min(Low)`、`Close = 尾根 Close`、`Volume = Σ Volume`。
+
+`partial_bar` 仅允许展示；默认不参与交易确认。特别是 90min 尾巴 K 线不会单独触发结构交易信号，交易确认路径会取最后一根完整 90min K 线。
 
 > **采集策略**：所有市场只采集 5min K 线（A 股 / 港股走 akshare `*_hist_min_em(period='5')`，美股走 yfinance `interval='5m'`），高粒度由 `app/services/resample.py` 在决策时合成。这样一次性绕开 Yahoo 不支持 120m、yfinance 把 A 股小时线按美股 RTH 切片产生 12:30 伪 K 线、Yahoo 港股小时线返回空等三类数据源限制。
 
@@ -154,15 +161,16 @@ strictly_greater(a, b, eps = 0.001):
 | 二级共振 | ≥ 2 根同时结构 active | 1.5 |
 | 三级共振 | 三根同时结构 active | 2.0 |
 
-权重 ≥ 2.0 时归类为「高级别结构」，可作为加强 BS 参考。（日线不参与结构共振计数；趋势由日线单独给出。）
+`resonance_weight ≥ 2.0` 时归类为高级别结构，可提升展示用 `signal_strength` / `confidence_label`，但不乘入真实 `order_weight`。（日线不参与结构共振计数；趋势由日线单独给出。）
 
 #### 6. 结构信号有效期
 
-*   75% 与 100% 信号在事件触发的那一根 K 线为 `True`，但其"有效状态"在后续 `H = 5` 根 K 线内保持，用于与序列共振。
+*   75% 与 100% 信号在事件触发的那一根 K 线为 `True`，但其"有效状态"在后续周期内部 `event_valid_bars`（默认 5 根）内保持；active 期内必须保留事件类型（如 `top_100`）和事件发生时间，供整合层判断。
+*   日频交易计划另按 `trading_valid_days` 判断结构是否仍影响次日计划：60min=1 个交易日、90min=1 个交易日、120min=2 个交易日、daily=5 个交易日。
 *   出现以下情况之一，结构有效状态立即失效：
     *   出现反向钝化（如顶部 100% 形成后出现底部钝化）。
     *   趋势仓位反向跃迁（如 10 → 0、6 → 0）。
-    *   `H` 根 K 线已过。
+    *   周期内部 `event_valid_bars` 或日频 `trading_valid_days` 已过。
 
 ---
 
@@ -198,12 +206,12 @@ min(Low[bar8], Low[bar9]) ≤ min(Low[bar6], Low[bar7])
 
 #### 3. 失效与有效期
 
-*   完整形成 9 后，信号在 `H = 5` 根 K 线内保持有效，用于与结构共振。
+*   完整形成 9 后，信号在 `H = 5` 根 K 线内保持有效，用于与结构共振和执行纪律提示。
 *   失效条件：
     *   高 9 形成后，价格向下跌破"9 区间内最低 Low" → 立即失效。
     *   低 9 形成后，价格向上突破"9 区间内最高 High" → 立即失效。
     *   超过有效期 `H` 根 K 线 → 自动失效。
-*   本算法仅实现 Setup 9，不做 Countdown 13；定位为辅助级信号，不单独驱动 BS。
+*   本算法仅实现 Setup 9，不做 Countdown 13；定位为执行纪律信号，不单独驱动真实交易动作。
 
 #### 4. 动态显示规则
 
@@ -212,73 +220,81 @@ min(Low[bar8], Low[bar9]) ≤ min(Low[bar6], Low[bar7])
 
 ---
 
-### 四、系统整合：可量化 BS 点的层次化决策
+### 四、系统整合：三层状态机（趋势为王、结构修边、序列纪律）
 
-**API / 服务实现约定（周期分工）**
+**执行语义**：T 日收盘后生成一次决策，T+1 可执行时点下单；遇到周末时顺延至下一工作日的可执行时段。**不做高频、不用未来函数**。
 
-- **趋势**：仅使用 **日线** 计算 `position` 与 `standards.trend`；`view.trend` 与之对齐。
-- **结构**：仅在 **60min / 90min / 120min** 三根 K 线上分别运行 MACD 结构状态机，再在服务端合并：`signals.structure_by_period`、`standards.structure_by_period` 为分周期快照；顶层 `signals.structure` 取三周期中「事件强度最高」的枚举（`100%` 优先于 `75%`，同分则 **60 > 90 > 120**）；`signals.structure_active` 为任一周期为真即真。
-- **序列**：默认在 **日线** 上计算九转（与趋势同频，符合「趋势为王、序列再次之」；若后续要为序列单独指定周期，再通过配置扩展）。
-- **对外快照**：`timestamp` / `close` / `execute_at` 对齐 **日线最后一根**。HTTP 请求里的 `interval` 仅作 `requested_interval` 回显，**不改变算法**；响应顶层 `interval` 固定为 `integrated`。
+**突破判定（趋势）**：T 日 `Close` 仅与 **T-1 已确定轨线**比较；当日 `High/Low` 抬高的 `channel_T` 不参与 T 日突破判定。
 
-系统按以下三级运算，最终输出**可执行的 BS 点**：`{ action, weight, confidence, execute_at }`。
+**API / 周期分工**
 
-#### 第一级：趋势定仓 → 主 BS 点来源
+- **趋势**：仅 **日线** → `base_target_position`、`position_cap` / `position_floor`、`trend_state`。
+- **结构**：**60min / 90min / 120min** MACD 结构；通用周期优先级 **daily > 120 > 90 > 60**，API 共振统计仅用 **120 > 90 > 60**；事件完成度优先级 **100% > 75%**；`90min` 末根 `partial_bar` 默认不参与交易确认。
+- **序列**：默认 **日线** 九转 → `execution_rules`（如 `NO_CHASE`、`NO_PANIC_SELL`），**默认不改变** `final_target_position`。
+- **对外快照**：`timestamp` / `close` / `execute_at` 对齐日线最后一根；`interval` 固定 `integrated`。
 
-调用趋势模块得到 `position_T`（10 / 6 / 4 / 0 / NaN）。
+#### 第一层：趋势层（战略仓位）
 
-**主 BS 点 = 仓位跃迁**：
+`trend_state`：`UP_STRONG` / `UP_PULLBACK` / `RANGE` / `DOWN_REBOUND` / `DOWN_STRONG` / `UNKNOWN`。
+
+| 状态 | base | cap | floor |
+|------|------|-----|-------|
+| UP_STRONG | 10 | 10 | 6 |
+| UP_PULLBACK | 6 | 8 | 4 |
+| RANGE | 继承或衰减至 `range_target_position`（默认 4） | 4 | 0 |
+| DOWN_REBOUND | 4 | 4 | 0 |
+| DOWN_STRONG | 0 | 0 | 0 |
+| UNKNOWN | — | — | — |
+
+`RANGE` 连续 `transition_decay_days`（默认 3）日后衰减至区间目标仓位，避免永久黏滞旧仓。
+
+#### 第二层：结构层（修边，不反客为主）
 
 ```
-delta = position_T − position_{T-1}
-if delta > 0  →  action = BUY,  base_weight =  delta / 10
-if delta < 0  →  action = SELL, base_weight = |delta| / 10
-if delta = 0  →  action = HOLD, base_weight = 0
+structure_adjustment ∈ [-max_structure_adjustment, +max_structure_adjustment]  （默认 ±2）
+final_target = clamp(base_target + structure_adjustment, position_floor, position_cap)
 ```
 
-执行时点：`T+1` 开盘。`confidence = trend`。
+- 顶部结构：**不得**在上升趋势中反手做空至 0；仅降 cap 内目标或输出 `NO_CHASE` / `TRIM_ALLOWED`。
+- 底部结构：**不得**在 `DOWN_STRONG` 直接 BUY；可 `BOTTOM_WATCH` / `NO_PANIC_SELL`。
+- 顶底冲突：`structure_adjustment = 0`，`CONFLICT_WARNING`。
+- `signals.resonance` 仅展示；**不乘入**真实 `weight`。
 
-> **设计要点**：BS 点不再是"某一根 K 线的某个布尔触发"，而是"目标仓位发生变化"这一**状态跃迁**事件。这样既符合"趋势为王"，又天然产出可执行的调仓比例。
+结构对次日计划有效期（`trading_valid_days`）：60/90min 默认 1 日，120min 2 日，daily 5 日。
 
-#### 第二级：结构修边 → BS 强度修饰
+#### 第三层：序列层（执行纪律）
 
-**不加仓规则**：`position_T ≤ 4` 时，禁止由结构产生新的买入；底部结构仅可"减小本次卖出量"或"持币观望"。
+- 高九 active → `NO_CHASE`；与顶结构 + 强趋势 → `TRIM_ALLOWED`。
+- 低九 active → `NO_PANIC_SELL`；回调 + 底结构 → `PULLBACK_BUY_CANDIDATE`。
+- `is_near_historical_extreme` 仅 `probe` / 预警，不驱动 action。
+- 默认 **不**修改 `final_target_position`；可选 `sequence_execution_bias_enabled`（默认 false）。
 
-**不减仓规则**：`position_T ≥ 6` 时，禁止由结构产生新的卖出；顶部结构仅可"减小本次买入量"或"持股待涨"。
+#### 最终决策与 action
 
-**核心做多（增强 B）**：`position_T ≥ 6` 且 底部结构 75% 或 100% 处于有效期内 → 在主 BS 基础上施加倍率：
-*   75%：`weight ×= 1.2`
-*   100%：`weight ×= 1.5`
+```
+actual_position  ≈ 上一交易日 final_target（无持仓 API 时的代理）
+order_delta      = final_target − actual_position
+order_weight     = clamp(|order_delta| / 10, 0, 1)    ← API 字段 weight
+signal_strength  ≥ order_weight，仅排序/展示，可 > 1
 
-并把 **60/90/120min** 上的结构共振级别写入 API `signals.resonance`（见 §二 §5），供客户端展示与风控参考（当前实现不将该 level 直接乘入 `weight`）。
+if final_target > actual  → BUY
+if final_target < actual  → SELL
+if equal                  → HOLD（可有纪律规则）
+if UNKNOWN / 无目标      → WAIT
+```
 
-**核心做空（增强 S）**：`position_T ≤ 4` 且 顶部结构 75% 或 100% 处于有效期内 → 同理叠乘。
+次日执行原则（`principle` / `forbidden_actions` / `invalidation`）：如 BUY+`NO_CHASE` 时高开超 `max_chase_gap` 不追；SELL+`NO_PANIC_SELL` 时低开分批。
 
-`confidence` 提升为 `core`。
+#### API 输出（向后兼容 + 扩展）
 
-> **设计要点**：此处用 `≥ 6` / `≤ 4` 而非原版的 `≥ 4` / `≤ 6`，**避免仓位 = 4 或 = 6 时同一根 K 线既触发做多又触发做空的逻辑矛盾**。
+| 旧字段 | 含义（新） |
+|--------|------------|
+| `action` | BUY / SELL / HOLD / WAIT |
+| `weight` | **order_weight**，恒 ∈ [0, 1] |
+| `confidence` | 映射自 `confidence_label`（trend / core / resonance） |
+| `position.current` | **final_target_position** |
+| `position.prev` | **actual_position** |
 
-#### 第三级：序列精修 → 共振点放大
+扩展字段：`next_day_plan`、`trend`、`structure`、`sequence`、`decision`、`explanation`（见 `app/schemas/decision.py`）。
 
-*   **共振买入**：满足核心做多 + 低 9 序列在有效期内 → `weight ×= 1.2`，`confidence = resonance`，标记 `resonance_buy = True`。
-*   **共振卖出**：满足核心做空 + 高 9 序列在有效期内 → 同理，标记 `resonance_sell = True`。
-*   **左侧试探**：若序列 9 完美形成于重要历史高低点附近、而结构尚未形成，仅作为预警字段输出（`probe = True`），不进入 action / weight 输出，最终决策仍需等待结构确认。
-
-#### 决策输出字段（每根 K 线）
-
-| 字段 | 类型 | 含义 |
-|------|------|------|
-| `position` | float | 当根目标仓位（10 / 6 / 4 / 0 / NaN） |
-| `prev_position` | float | 上一根目标仓位，用于跃迁判定 |
-| `action` | enum | `BUY` / `SELL` / `HOLD` |
-| `weight` | float | 调仓比例，含结构与序列加成；0 ~ ~3 |
-| `confidence` | enum | `trend` / `core` / `resonance` |
-| `top_structure_75/100`, `bottom_structure_75/100` | bool | 结构事件（事件触发那根 K 线为 True） |
-| `structure_effective_until` | int / 时间戳 | 结构信号失效截止 |
-| `high9_signal`, `low9_signal` | bool | 序列事件 |
-| `sequence_effective_until` | int / 时间戳 | 序列信号失效截止 |
-| `resonance_buy`, `resonance_sell` | bool | 三级共振标记 |
-| `probe` | bool | 左侧试探预警，仅参考 |
-| `execute_at` | 时间戳 | 实际可执行时点（默认 T+1 开盘） |
-
-这是系统最终对外暴露的、**可量化、可下单**的 BS 点定义。
+实现入口：`app/algos/integrated_decision.py` → `build_daily_trading_plan()`。

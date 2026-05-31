@@ -22,6 +22,14 @@ class TestAPI:
         assert resp.status_code == 200
         assert resp.get_json()['status'] == 'ok'
 
+    def test_frontend_index(self, client):
+        resp = client.get('/')
+        assert resp.status_code == 200
+        text = resp.get_data(as_text=True)
+        assert 'StockQuant' in text
+        assert '/static/css/app.css' in text
+        assert '/static/js/app.js' in text
+
     def test_register_stock_success(self, client):
         self.mock_ws.register_stock.return_value = {
             'success': True, 'message': '工作流已创建',

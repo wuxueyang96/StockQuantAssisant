@@ -4,6 +4,8 @@
 
 数据以 **Parquet 列存格式** 直接存储在云对象存储（S3 / 阿里云 OSS）上，DuckDB 通过 httpfs 扩展远程读写，实现真正的存算分离和零本地盘部署。
 
+系统当前采用「趋势为王、结构修边、序列纪律」的日频三层决策模型：每天收盘后生成一次次日计划，输出次日目标仓位、可执行动作、交易原则、禁止动作、失效条件和解释文本。
+
 ## 项目结构
 
 ```
@@ -21,12 +23,21 @@ StockQuantAssisant/
 │   ├── __init__.py                # Flask 工厂函数
 │   ├── config.py                  # 配置文件
 │   ├── algos/
+│   │   ├── config.py              # 策略配置与枚举
 │   │   ├── trend.py               # 趋势量化（双 EMA 通道）
 │   │   ├── structure.py           # 结构量化（MACD 背离判定）
 │   │   ├── sequence.py            # 序列量化（九转序列）
-│   │   └── decision.py            # 决策引擎（三级整合）
+│   │   ├── integrated_decision.py # 三层次日计划整合
+│   │   └── decision.py            # 决策引擎（三层整合）
+│   ├── schemas/
+│   │   └── decision.py            # DailyTradingPlan dataclass schema
 │   ├── api/
 │   │   └── routes.py              # REST API 路由
+│   ├── templates/
+│   │   └── index.html             # 前端控制台页面
+│   ├── static/
+│   │   ├── css/app.css            # 前端样式
+│   │   └── js/app.js              # 前端交互
 │   ├── models/
 │   │   └── database.py            # DuckDB httpfs 引擎（Parquet on OSS）
 │   ├── scheduler/
@@ -36,18 +47,23 @@ StockQuantAssisant/
 │       ├── workflow_service.py    # 工作流注册与管理
 │       ├── analysis_service.py    # 量化分析服务
 │       ├── chart_service.py       # K 线图表渲染（mplfinance）
-│       └── resample.py            # 多周期 OHCV 重采样（5min → 60/90/120/daily）
-├── tests/                         # 单元测试（212 个）
+│       └── resample.py            # 多周期 OHLCV 重采样（5min → 60/90/120/daily）
+├── tests/                         # 单元测试（232 个）
 │   ├── conftest.py
 │   ├── test_algorithm.py
 │   ├── test_analysis_service.py
 │   ├── test_api.py
 │   ├── test_chart.py
 │   ├── test_database.py
+│   ├── test_integrated_decision.py
 │   ├── test_integration.py
 │   ├── test_parquet_store.py
 │   ├── test_resample.py
+│   ├── test_resample_partial_bar.py
+│   ├── test_sequence_execution_rules.py
 │   ├── test_stock_service.py
+│   ├── test_structure_boundaries.py
+│   ├── test_trend_no_lookahead.py
 │   └── test_workflow_service.py
 └── e2e/
     ├── run.py                     # API 全链路 E2E
@@ -103,7 +119,7 @@ python run.py start --host 0.0.0.0 --port 5000
 ### 运行测试
 
 ```bash
-pytest tests/ -v                    # 单元测试（212 个）
+pytest tests/ -v                    # 单元测试（232 个）
 python3 e2e/test_parquet.py         # Parquet 本地 E2E
 python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 ```
@@ -120,10 +136,10 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 
 ### 量化决策引擎
 
-- **趋势量化**：双 EMA 通道（短周期 26 / 长周期 90，3% 偏移）判断趋势方向，输出 10/6/4/0 目标仓位
-- **结构量化**：MACD 背离检测状态机（顶背离 / 底背离：钝化 → 75% DIF 转向 → 100% DIF/DEA 交叉），量化趋势衰竭转折点
-- **序列量化**：九转序列（高九卖出 / 低九买入），左侧择时信号，5 周期有效窗口
-- **决策整合**：三级优先级 — 趋势定仓 → 结构择时 → 序列共振，支持多周期联合研判
+- **趋势层**：日线双通道（短周期 26 / 长周期 90，默认 3% 偏移）决定战略方向、基础目标仓位、仓位上限/下限。
+- **结构层**：60/90/120min MACD 背离结构只做仓位边界内的修边，不反转趋势方向，不放大真实下单比例。
+- **序列层**：日线九转只输出执行纪律，如 `NO_CHASE` / `NO_PANIC_SELL`，默认不改变最终目标仓位。
+- **次日计划**：`weight = order_weight = abs(final_target - actual_position) / 10`，恒在 `[0, 1]`；`signal_strength` 仅用于展示和排序。
 
 ## REST API
 
@@ -142,6 +158,16 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 | `GET` | `/api/workflows` | 查看所有工作流 |
 | `DELETE` | `/api/workflows/<id>` | 删除工作流 |
 | `GET` | `/api/health` | 健康检查 |
+
+## 前端控制台
+
+启动服务后访问根路径即可打开内置控制台，无需额外前端构建步骤：
+
+```bash
+http://127.0.0.1:5000/
+```
+
+页面直接调用现有 API，支持输入标的分析、注册工作流、查看次日交易计划、集成图表和原始 JSON。
 
 ## 工作流机制
 

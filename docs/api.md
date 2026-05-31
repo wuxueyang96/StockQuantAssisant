@@ -1,15 +1,32 @@
 # API 文档
 
-Base URL: `/api`，所有响应为 JSON，包含 `success` 字段。
+API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内置前端控制台位于根路径 `/`。
 
 ## 目录
 
+- [前端控制台](#前端控制台)
 - [健康检查](#健康检查)
 - [股票代码映射](#股票代码映射)
 - [工作流注册](#工作流注册)
 - [量化决策](#量化决策)
 - [行情图表](#行情图表)
 - [工作流查询](#工作流查询)
+
+---
+
+## 前端控制台
+
+### GET /
+
+返回内置单页控制台 HTML。页面静态资源由 Flask `static` 目录提供，无需单独构建前端。
+
+主要能力：
+
+- 输入股票代码或名称并调用 `POST /api/stock/decision` 获取三层次日计划
+- 调用 `POST /api/stock/register` 注册 5min 数据工作流
+- 展示 `next_day_plan`、趋势/结构/序列分层信息、执行纪律、集成图表和原始 JSON
+
+**响应** `200` — `text/html`
 
 ---
 
@@ -101,9 +118,9 @@ Base URL: `/api`，所有响应为 JSON，包含 `success` 字段。
 
 ### POST /stock/decision
 
-返回最新可量化 BS 点。决策语义以 [algorithm.md §四](algorithm.md) 为权威源。
+返回最新日频三层次日交易计划。决策语义以 [algorithm.md §四](algorithm.md) 为权威源。
 
-响应分四块：**决策**（`action` / `weight` / `confidence` / `execute_at`）→ **信号**（`signals`）→ **阈值**（`standards`）→ **人话视图**（`view`）。
+响应分四块：**决策**（`action` / `weight` / `confidence` / `execute_at`）→ **信号**（`signals`）→ **阈值**（`standards`）→ **人话视图**（`view`）。另附 **三层计划**（`next_day_plan` 或分拆的 `trend` / `structure` / `sequence` / `decision` / `explanation`）。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -122,21 +139,21 @@ Base URL: `/api`，所有响应为 JSON，包含 `success` 字段。
     "market": "a",
     "stock_code": "000001",
     "display_code": "000001.SZ",
-    "timestamp": "2026-04-25T00:00:00+08:00",
+    "timestamp": "2026-04-24T00:00:00+08:00",
     "close": 10.41,
     "action": "SELL",
     "weight": 0.4,
     "confidence": "trend",
-    "execute_at": "2026-04-26 09:30:00",
+    "execute_at": "2026-04-27T00:00:00+08:00",
     "position": { "current": 6.0, "prev": 10.0, "label": "重仓" },
     "signals": {
       "structure": "none",
       "structure_active": false,
       "structure_until": null,
       "structure_by_period": {
-        "60min":  { "structure": "none", "structure_active": false, "structure_until": null },
-        "90min":  { "structure": "none", "structure_active": false, "structure_until": null },
-        "120min": { "structure": "none", "structure_active": false, "structure_until": null }
+        "60min":  { "structure": "none", "structure_active": false, "structure_until": null, "partial_bar": false },
+        "90min":  { "structure": "none", "structure_active": false, "structure_until": null, "partial_bar": true },
+        "120min": { "structure": "none", "structure_active": false, "structure_until": null, "partial_bar": false }
       },
       "sequence": "none",
       "sequence_active": false,
@@ -178,7 +195,57 @@ Base URL: `/api`，所有响应为 JSON，包含 `success` 字段。
         "sequence_source": "daily"
       },
       "rationale": "收盘 10.41 在短轨 [10.12, 10.85] 区间内；趋势判定 上升（重仓）；本根触发 SELL（trend 置信度）。"
-    }
+    },
+    "next_day_plan": {
+      "date": "2026-04-24",
+      "symbol": "000001.SZ",
+      "close": 10.41,
+      "execute_date": "2026-04-27",
+      "execute_at": "2026-04-27T00:00:00+08:00",
+      "trend": {
+        "state": "UP_PULLBACK",
+        "base_target_position": 6.0,
+        "position_cap": 8.0,
+        "position_floor": 4.0,
+        "previous_position": 10.0
+      },
+      "structure": {
+        "adjustment": 0,
+        "bias": "NEUTRAL",
+        "active_periods": [],
+        "strongest_event": "none",
+        "highest_timeframe_event": "none",
+        "resonance_count": 0,
+        "resonance_weight": 0.0,
+        "warnings": []
+      },
+      "sequence": {
+        "high9_active": false,
+        "low9_active": false,
+        "probe": false,
+        "near_historical_extreme": false,
+        "execution_rules": []
+      },
+      "decision": {
+        "actual_position": 10.0,
+        "final_target_position": 6.0,
+        "order_delta": -4.0,
+        "order_weight": 0.4,
+        "action": "SELL",
+        "signal_strength": 0.4,
+        "confidence_label": "trend",
+        "principle": "次日按目标仓位减仓。",
+        "forbidden_actions": [],
+        "no_trade_condition": "",
+        "invalidation": "若收盘重新站上短上轨且长趋势转强，减仓节奏可放缓。"
+      },
+      "explanation": ["日线趋势：上升趋势回调，战略仓位 6.0。"]
+    },
+    "trend": { "...": "同 next_day_plan.trend" },
+    "structure": { "...": "同 next_day_plan.structure" },
+    "sequence": { "...": "同 next_day_plan.sequence" },
+    "decision": { "...": "同 next_day_plan.decision" },
+    "explanation": ["日线趋势：上升趋势回调，战略仓位 6.0。"]
   }]
 }
 ```
@@ -191,12 +258,15 @@ Base URL: `/api`，所有响应为 JSON，包含 `success` 字段。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `action` | enum | `BUY` / `SELL` / `HOLD`，由仓位跃迁推导 |
-| `weight` | float | 调仓比例 = `|delta|/10` × 结构倍率 × 共振倍率 × 序列倍率 |
-| `confidence` | enum | `trend`（仅趋势）/ `core`（叠加结构）/ `resonance`（再叠序列共振） |
-| `execute_at` | string/null | 可执行时点，默认 `T+1 Open` |
-| `position.current` | float/null | 当根目标仓位：10 / 6 / 4 / 0（冷启动为 null） |
-| `position.prev` | float/null | 上一根目标仓位 |
+| `action` | enum | `BUY` / `SELL` / `HOLD` / `WAIT`，由 `final_target` 与 `actual_position` 差值推导 |
+| `weight` | float | **真实下单比例** `order_weight` = clamp(\|final−actual\|/10, 0, 1)；**不含**结构/序列倍率放大 |
+| `confidence` | enum | `trend` / `core` / `resonance`（映射自 `decision.confidence_label`） |
+| `execute_at` | string/null | 可执行日期/时点，默认下一工作日可执行时段；具体开盘撮合由执行系统处理 |
+| `position.current` | float/null | **次日目标仓位** `final_target_position` |
+| `position.prev` | float/null | **当前仓位代理** `actual_position`（默认=上一日 final_target） |
+| `next_day_plan` | object | 完整 `DailyTradingPlan`（含 principle、forbidden_actions、invalidation） |
+| `trend` / `structure` / `sequence` / `decision` | object | 与 `next_day_plan` 内同名块一致，便于前端分拆消费 |
+| `explanation` | string[] | 每日决策解释条目 |
 | `position.label` | string | 中文：满仓 / 重仓 / 轻仓 / 空仓 / 冷启动 |
 
 **信号块 `signals`**：
@@ -206,7 +276,7 @@ Base URL: `/api`，所有响应为 JSON，包含 `success` 字段。
 | `structure` | enum | 三周期合并主视图：`none` / `top_75` / `top_100` / `bottom_75` / `bottom_100` |
 | `structure_active` | bool | 任一 60/90/120min 结构有效即为 true |
 | `structure_until` | string/null | 各 active 周期 effective_until 的最大值 |
-| `structure_by_period` | object | 各周期 `{structure, structure_active, structure_until}` |
+| `structure_by_period` | object | 各周期 `{structure, structure_active, structure_until, partial_bar}`；90min partial 默认仅展示、不参与交易确认 |
 | `sequence` | enum | 日线九转事件：`none` / `high9` / `low9` |
 | `sequence_active` | bool | 序列有效状态（H=5 根） |
 | `sequence_until` | string/null | 序列有效期截止时间戳 |
@@ -240,7 +310,7 @@ Base URL: `/api`，所有响应为 JSON，包含 `success` 字段。
 | `view.next_triggers.high9_progress` / `low9_progress` | string | 日线九转进度 `"N/9"` |
 | `view.rationale` | string | 一句话态势总结 |
 
-> **执行语义**：所有信号基于当周期收盘价判定。`execute_at` 为下一根可执行 K 线开盘时间，不应在当周期内提前建仓。
+> **执行语义**：所有交易信号每天收盘后生成一次，用于下一工作日计划。页面或 API 展示的盘中图表不代表盘中高频重算信号。
 
 **响应** `400`
 ```json

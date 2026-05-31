@@ -1,117 +1,153 @@
-### 服务端程序需求（Python + REST API）
+# 服务端程序需求与当前实现
 
-实现一个服务端程序，对外提供 REST API。核心功能：根据股票代码或名称，自动注册并调度四个数据同步工作流，每个工作流负责将指定周期的历史数据写入 DuckDB 数据库，并按固定间隔增量更新。
-
----
-
-#### 1. API 行为
-
-- **输入**：股票代码（如 `000001.SZ`）或股票名称（如 `贵州茅台`）
-- **处理逻辑**：
-  1. 若服务端已存在该股票对应的工作流（唯一标识见下文），则直接返回现有工作流信息。
-  2. 若不存在，则根据输入解析出股票代码和市场（A股/港股/美股），并注册四个独立的工作流（分别对应四种周期）。
-- **输出**：工作流注册状态及调度信息。
-
-> 名称解析：若输入为名称，需先通过名称查找对应的股票代码及市场。
+StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台、REST API、行情数据采集、任务调度和日频量化决策。当前实现以 **5min 采集 + 运行时重采样 + 三层次日计划** 为核心。
 
 ---
 
-#### 2. 工作流唯一标识
+## 1. Web 与 API 行为
 
-格式：`{市场}_{股票代码}_{周期}`  
-示例：`A_000001.SZ_daily`
+- `GET /`：返回内置前端控制台。
+- `POST /api/stock/decision`：输入股票代码或名称，返回最新三层次日交易计划。
+- `POST /api/stock/register`：注册数据同步工作流。
+- `GET /api/stock/chart`：返回集成或单周期 PNG 行情图。
+- `POST /api/stock/code` / `GET /api/stock/codes`：维护股票名称与市场代码映射。
+- `GET /api/health`：健康检查。
 
-- 市场：`A`（A股）、`HK`（港股）、`US`（美股）
-- 股票代码：使用标准代码格式（如 `00700.HK`、`AAPL.US`）
-- 周期：`daily`、`120min`、`90min`、`60min`
+输入支持：
+
+- A 股：`000001`、`000001.SZ`、`600519.SS`、已录入中文名称
+- 港股：`00700`、`00700.HK`、已录入中文名称
+- 美股：`AAPL`、`AAPL.US`、已录入中文名称
+
+名称解析通过 `stock_codes` 元数据表完成。若名称匹配多个市场，则一次返回多个市场结果。
 
 ---
 
-#### 3. 数据库与表结构
+## 2. 工作流唯一标识
 
-- 数据以 **Parquet 列存格式** 存储在 OSS（S3 / 阿里云 OSS / MinIO）上。
-- 每个工作流对应一个 Parquet 文件，路径 `{market}/{table_name}.parquet`。
-- 元数据（stock_codes / workflows）以独立 Parquet 文件存储在 `metadata/` 目录下。
-- 运行时由 DuckDB 的 httpfs 扩展直接远程读写，**零本地磁盘持久化**。
+当前采集层只创建 **1 个 5min 工作流**。高周期 K 线不落库，由 `resample` 在决策时从 5min 数据运行时合成。
 
-Parquet 文件结构：
-```
+格式：`{市场}_{股票代码}_5min`
+
+| 市场 | 示例 |
+|------|------|
+| A 股 | `A_000001.SZ_5min`、`A_600519.SS_5min` |
+| 港股 | `HK_00700.HK_5min` |
+| 美股 | `US_AAPL.US_5min` |
+
+历史的 `daily` / `120min` / `90min` / `60min` 工作流不再创建。
+
+---
+
+## 3. 数据库与表结构
+
+- 数据以 **Parquet 列存格式** 存储在 OSS / S3 / MinIO，未配置 OSS 时使用本地目录。
+- 每个 5min 工作流对应一个 Parquet 文件：`{market}/{table_name}.parquet`。
+- 元数据（`stock_codes` / `workflows`）存储在 `metadata/` 目录下。
+- DuckDB 通过 httpfs 远程读写 Parquet，实现存算分离。
+
+目录结构：
+
+```text
 s3://{bucket}/
 ├── metadata/
 │   ├── stock_codes.parquet
 │   └── workflows.parquet
 ├── a/
-│   └── {table}.parquet
+│   └── A_000001.SZ_5min.parquet
 ├── hk/
-│   └── {table}.parquet
+│   └── HK_00700.HK_5min.parquet
 └── us/
-    └── {table}.parquet
+    └── US_AAPL.US_5min.parquet
 ```
 
 ---
 
-#### 4. 工作流注册时的初始化
+## 4. 工作流注册时的初始化
 
-当注册一个新股票的工作流时，检查对应周期的表是否存在：
+注册新股票时：
 
-- 若**不存在**，则创建表，并拉取该股票**过去 200 个完整周期**的历史数据写入表中。
-  - 日线 → 过去 200 个交易日
-  - 120分钟线 → 过去 200 个 120 分钟 K 线
-  - 90分钟线 → 过去 200 个 90 分钟 K 线
-  - 60分钟线 → 过去 200 个 60 分钟 K 线
-- 若**已存在**，则跳过初始化，直接进入调度。
+1. 解析输入市场和代码。
+2. 为每个市场检查唯一 5min 工作流。
+3. 若对应 Parquet 文件不存在，则创建表。
+4. 若表为空，则立即拉取初始 5min 历史数据。
+5. 保存工作流元数据，并由调度器按 5 分钟间隔增量采集。
 
----
-
-#### 5. 调度与更新策略
-
-每个工作流按照其周期定时执行数据获取逻辑，并写入对应 DuckDB 表。**所有执行均需避开非交易时段**（即只在交易时间段内运行）。
-
-| 周期   | 执行间隔       | 每次获取内容                     |
-|--------|----------------|----------------------------------|
-| 日线   | 每天一次        | 最近 1 个交易日数据（若为新数据） |
-| 120分钟| 每 120 分钟一次 | 最近 1 个 120 分钟 K 线（若为新） |
-| 90分钟 | 每 90 分钟一次  | 最近 1 个 90 分钟 K 线（若为新）  |
-| 60分钟 | 每 60 分钟一次  | 最近 1 个 60 分钟 K 线（若为新）  |
-
-- **新数据判断**：对比待写入数据的时间戳与表中最新记录的时间戳，仅当时间戳更新时才写入，否则跳过。
-- **交易日判断**：在每个工作流执行前，检查当前时间是否属于对应市场的交易时间段（需考虑节假日、休市）。非交易时段直接跳过本次执行。
+若工作流已存在但数据表为空，系统会尝试补拉初始数据。
 
 ---
 
-#### 6. 工作流持久化
+## 5. 调度与更新策略
 
-- 所有已注册的工作流（及其调度配置）需要**持久化存储**（使用 DuckDB 元数据表）。
-- 服务重启时，自动加载所有已存在的工作流，恢复定时调度，无需重新注册。
-- 支持 **stateless 部署模式**：通过 OSS 对象存储（S3 / 阿里云 OSS / MinIO）在实例间同步 DuckDB 数据文件，实现计算与数据分离。
+| 工作流周期 | 执行间隔 | 数据用途 |
+|------------|----------|----------|
+| 5min | 每 5 分钟 | 原始行情采集；决策时合成 daily / 60min / 90min / 120min |
 
-#### 7. Stateless 部署 (Parquet on OSS)
+- 每次采集会与已有数据按时间戳去重合并。
+- 调度任务在非交易时段跳过。
+- 高周期 K 线由 `app/services/resample.py` 合成：按交易日分组、按日内 K 线序号切桶，不跨日合并。
+- 90min 最后一根不足 18 根 5min 时标记 `partial_bar=true`，默认只用于展示，不参与结构交易确认。
+
+---
+
+## 6. 量化决策服务
+
+`analyze_stock(stock_input, interval='daily')` 的 `interval` 参数仅作为 `requested_interval` 回显。算法固定为 `integrated`：
+
+1. 读取 `*_5min` 数据。
+2. 合成日线、60min、90min、120min。
+3. 日线趋势层输出 `base_target_position`、`position_cap`、`position_floor`。
+4. 60/90/120min 结构层输出修边、风险提示、共振信息。
+5. 日线序列层输出执行纪律。
+6. 生成 `DailyTradingPlan`，并映射成向后兼容的 API 字段。
+
+真实下单比例：
+
+```text
+order_delta = final_target_position - actual_position
+weight = order_weight = clamp(abs(order_delta) / 10, 0, 1)
+```
+
+结构/序列不会再乘大真实 `weight`；`signal_strength` 仅用于展示和排序。
+
+---
+
+## 7. 工作流持久化
+
+- 工作流元数据写入 `metadata/workflows.parquet`。
+- 服务启动时加载已有工作流。
+- 注册接口会返回已存在的工作流，避免重复创建。
+- Stateless 部署模式下，多个实例可共享同一个 OSS 存储。
+
+---
+
+## 8. Stateless 部署 (Parquet on OSS)
 
 数据以 Parquet 格式直接存储在 OSS 上，DuckDB 通过 httpfs 扩展远程读写：
 
-- **零本地磁盘**：OHLCV 数据和元数据均以 Parquet 文件存储在 OSS，无需 sync_down/sync_up
-- **远程查询**：DuckDB `read_parquet('s3://...')` 带谓词下推和列裁剪，只传输需要的行/列
-- **直接写入**：`COPY ... TO 's3://...' (FORMAT PARQUET)` 直接写 OSS，不经过本地
+- **零本地业务数据依赖**：OHLCV 数据和元数据均可在 OSS 中持久化。
+- **远程查询**：`read_parquet('s3://...')` 支持列裁剪和谓词下推。
+- **直接写入**：`COPY ... TO 's3://...' (FORMAT PARQUET)` 直接写 OSS。
 
 环境变量：
 
 | 变量 | 说明 |
 |------|------|
 | `OSS_BUCKET` | Bucket 名称，不设则使用本地 Parquet |
-| `OSS_ENDPOINT` | S3 兼容 Endpoint（如 `https://oss-cn-hangzhou.aliyuncs.com`） |
-| `OSS_REGION` | 区域（默认 `us-east-1`） |
-| `OSS_ACCESS_KEY_ID` | Access Key（不设则使用 IAM 角色） |
+| `OSS_ENDPOINT` | S3 兼容 Endpoint |
+| `OSS_REGION` | 区域，默认 `us-east-1` |
+| `OSS_ACCESS_KEY_ID` | Access Key，不设可使用 IAM 角色 |
 | `OSS_ACCESS_KEY_SECRET` | Secret Key |
-| `STOCKQUANT_DATA_DIR` | 本地临时目录（不配 OSS 时使用） |
-
-> **认证方式**：IAM 角色或手动 AK/SK 均支持。
+| `STOCKQUANT_DATA_DIR` | 本地数据目录，默认 `~/.stockquant/data/` |
 
 ---
 
-#### 8. 技术要求
+## 9. 技术要求
 
-- 使用 **Python** 开发。
-- 暴露 **REST API**（使用 Flask 框架）。
-- 数据存储：**Parquet on OSS**，DuckDB httpfs 扩展远程读写。
-- 任务调度：使用 `APScheduler` 实现周期性任务。
-- 数据源：使用 akshare（A 股）+ yfinance（港股、美股）双数据源。
+- Python + Flask
+- DuckDB + Parquet on OSS
+- APScheduler 任务调度
+- akshare + yfinance 数据源
+- pandas / NumPy 数据处理
+- matplotlib / mplfinance 图表渲染
+- 无构建链前端：Flask template + static CSS/JS

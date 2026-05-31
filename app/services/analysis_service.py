@@ -18,7 +18,7 @@ import pandas as pd
 from app.services.stock_service import (
     detect_market, get_table_name, format_stock_code, MARKET_LABEL,
 )
-from app.services.resample import resample_ohlcv
+from app.services.resample import drop_partial_bars_for_trade, resample_ohlcv
 from app.models.database import db_manager
 from app.algos.decision import DecisionEngine
 
@@ -60,6 +60,9 @@ def _structure_active_on_interval(df_5m: pd.DataFrame, itv: str) -> bool:
     df = _resample_or_none(df_5m, itv)
     if df is None or len(df) < 30:
         return False
+    df = drop_partial_bars_for_trade(df, itv)
+    if df is None or len(df) < 30:
+        return False
     try:
         ev = _engine.structure.evaluate(df)
         last = ev.iloc[-1]
@@ -69,19 +72,20 @@ def _structure_active_on_interval(df_5m: pd.DataFrame, itv: str) -> bool:
 
 
 def _enrich_resonance_integrated(base_summary: dict, df_5m: pd.DataFrame) -> None:
-    """共振：仅在 60/90/120 上统计结构 active 周期数。"""
+    """共振：使用已通过交易确认过滤的三层计划结果。"""
     sig = base_summary.get('signals') or {}
-    if not sig.get('structure_active'):
+    plan_struct = base_summary.get('structure') or {}
+    active_periods = [
+        p for p in (plan_struct.get('active_periods') or [])
+        if p in STRUCTURE_INTERVALS
+    ]
+    if not active_periods:
         sig['resonance'] = None
         return
 
-    active_periods = []
-    for itv in STRUCTURE_INTERVALS:
-        if _structure_active_on_interval(df_5m, itv):
-            active_periods.append(itv)
-
     k = len(active_periods)
-    level = 2.0 if k >= 3 else (1.5 if k == 2 else 1.0)
+    level = (plan_struct.get('resonance_weight')
+             or (2.0 if k >= 3 else (1.5 if k == 2 else 1.0)))
     sig['resonance'] = {'level': level, 'periods': active_periods}
 
 
@@ -151,6 +155,12 @@ def analyze_stock(stock_input: str, interval: str = 'daily') -> dict:
             'signals': summary.get('signals'),
             'standards': summary.get('standards'),
             'view': summary.get('view'),
+            'next_day_plan': summary.get('next_day_plan'),
+            'trend': summary.get('trend'),
+            'structure': summary.get('structure'),
+            'sequence': summary.get('sequence'),
+            'decision': summary.get('decision'),
+            'explanation': summary.get('explanation'),
         }
         results.append(record)
 

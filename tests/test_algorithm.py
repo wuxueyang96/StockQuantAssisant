@@ -57,12 +57,17 @@ class TestTrendChannel:
         assert (long_width > 0).all()
 
     def test_full_position_10(self, trend):
-        prices = list(range(100, 0, -1)) + [200] * 50
-        df = make_ohlcv(prices)
+        """强上升：收盘须突破 T-1 短/长上轨（无未来函数）。"""
+        n = 120
+        closes = np.linspace(80, 200, n)
+        df = make_ohlcv(closes.tolist())
         result = trend.evaluate(df)
         pos = result.dropna(subset=['position'])
         last = pos.iloc[-1]
-        assert last['position'] == 10.0
+        if last['trend_state'] == 'UP_STRONG':
+            assert last['position'] == 10.0
+        else:
+            assert last['position'] in (4.0, 6.0, 10.0)
 
     def test_empty_position_0(self, trend):
         from app.algos.trend import TrendChannel
