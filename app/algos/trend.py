@@ -40,9 +40,10 @@ def compute_channels(df: pd.DataFrame, config: StrategyConfig = DEFAULT_CONFIG) 
     ns = config.short_period
     nl = config.long_period
 
-    short_rmax = df['High'].rolling(ns, min_periods=1).max()
+    upper_series = df['Close'] if config.channel_upper_source == 'close' else df['High']
+    short_rmax = upper_series.rolling(ns, min_periods=1).max()
     short_rmin = df['Low'].rolling(ns, min_periods=1).min()
-    long_rmax = df['High'].rolling(nl, min_periods=1).max()
+    long_rmax = upper_series.rolling(nl, min_periods=1).max()
     long_rmin = df['Low'].rolling(nl, min_periods=1).min()
 
     if config.use_adaptive_offset:

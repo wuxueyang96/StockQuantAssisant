@@ -70,6 +70,7 @@ class StrategyConfig:
     fixed_offset: float = 0.03
     use_adaptive_offset: bool = False
     atr_period: int = 14
+    channel_upper_source: str = 'close'  # 'high' 用最高价, 'close' 用收盘价
     adaptive_offset_k: float = 0.5
     transition_decay_days: int = 3
     range_target_position: float = 4.0
