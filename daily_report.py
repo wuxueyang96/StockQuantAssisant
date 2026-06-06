@@ -20,7 +20,7 @@ def api_get(path):
 def api_post(path, data):
     r = subprocess.run(
         ["curl", "-s", "-X", "POST", f"{API}{path}", "-H", "Content-Type: application/json", "-d", json.dumps(data)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=600,
     )
     return json.loads(r.stdout) if r.stdout else {}
 
@@ -74,9 +74,9 @@ def collect_results():
                         continue
                     market_map = {"a": "A股", "hk": "港股", "us": "美股"}
 
-                    # 新版 API: DIF/DEA 在 standards.structure 里
-                    standards = r.get("standards", {})
-                    struct = standards.get("structure", {})
+                    # 四轨值：从 trend.key_lines 取当前日线通道
+                    trend = r.get("trend", {})
+                    kl = trend.get("key_lines", {}) if trend else {}
 
                     # 新版 API: 信号在 signals dict 里
                     sig_data = r.get("signals", {})
@@ -112,8 +112,10 @@ def collect_results():
                         "position": pos,
                         "action": action,
                         "confidence": confidence,
-                        "dif": struct.get("dif"),
-                        "dea": struct.get("dea"),
+                        "short_upper": kl.get("short_upper_current"),
+                        "short_lower": kl.get("short_lower_current"),
+                        "long_upper": kl.get("long_upper_current"),
+                        "long_lower": kl.get("long_lower_current"),
                         "signals": signals,
                     })
         except Exception as e:
@@ -135,12 +137,13 @@ def generate_report(results):
     full = [r for r in results if r["position"] == 10]
     heavy = [r for r in results if 6 <= r["position"] < 10]
     light = [r for r in results if 4 <= r["position"] < 6]
+    cold = [r for r in results if 0 < r["position"] < 4]
     empty = [r for r in results if r["position"] == 0]
     signaled = [r for r in results if r["signals"]]
 
     lines = []
     lines.append(f"📊 每日量化决策 ({now} UTC)")
-    lines.append(f"总计 {len(results)} 只 | 🟢满仓{len(full)} 🟡重仓{len(heavy)} 🔵轻仓{len(light)} 🔴空仓{len(empty)}")
+    lines.append(f"总计 {len(results)} 只 | 🟢满仓{len(full)} 🟡重仓{len(heavy)} 🔵轻仓{len(light)} 🚀冷启{len(cold)} 🔴空仓{len(empty)}")
     lines.append("=" * 60)
 
     def write_section(emoji, label, stocks):
@@ -150,21 +153,25 @@ def generate_report(results):
         lines.append(f"{emoji} {label} ({len(stocks)}只)")
         lines.append("-" * 60)
         # 表头（紧凑格式，适配微信等非等宽环境）
-        lines.append("股票 代码 价 DIF DEA 信号 操作")
+        lines.append("股票 代码 价 信号 操作")
         lines.append("-" * 60)
         for s in stocks:
             price = f"{s['close']:.2f}" if isinstance(s['close'], (int, float)) else "-"
-            dif = format_num(s['dif'])
-            dea = format_num(s['dea'])
+            su = f"{s['short_upper']:.2f}" if isinstance(s['short_upper'], (int, float)) else "-"
+            sl = f"{s['short_lower']:.2f}" if isinstance(s['short_lower'], (int, float)) else "-"
+            lu = f"{s['long_upper']:.2f}" if isinstance(s['long_upper'], (int, float)) else "-"
+            ll = f"{s['long_lower']:.2f}" if isinstance(s['long_lower'], (int, float)) else "-"
             sig = ",".join(s["signals"][:3]) if s["signals"] else "-"
             action = s.get("action", "-")
             name = s['name'][:12]
             code = s['code'][:13]
-            lines.append(f"{name} {code} {price} {dif} {dea} {sig} {action}")
+            lines.append(f"{name} {code} {price} {sig} {action}")
+            lines.append(f"  轨: 短{su}/{sl} 长{lu}/{ll}")
 
     write_section("🟢", "满仓", full)
     write_section("🟡", "重仓", heavy)
     write_section("🔵", "轻仓", light)
+    write_section("🚀", "冷启动", cold)
     write_section("🔴", "空仓", empty)
 
     # 信号关注
@@ -187,12 +194,12 @@ def main():
     print("确保服务运行中...")
     ensure_service()
 
-    print("刷新日线数据...")
-    try:
-        refresh_resp = api_post("/api/refresh", {})
-        print(f"  刷新结果: {refresh_resp.get('results', refresh_resp)}")
-    except Exception as e:
-        print(f"  刷新请求失败: {e}，继续使用现有数据")
+    print("强制刷新数据（跳过交易时间检查）...")
+    refresh_resp = api_post("/api/refresh", {})
+    if not refresh_resp.get('success'):
+        print(f"  ❌ 刷新失败: {refresh_resp}")
+        sys.exit(1)
+    print(f"  刷新完成: {refresh_resp.get('total_queries')} 次查询, {refresh_resp.get('total_rows_inserted')} 行新数据, {refresh_resp.get('errors')} 个错误")
 
     print("采集量化决策数据...")
     results = collect_results()

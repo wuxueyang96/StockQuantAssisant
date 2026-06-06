@@ -4,7 +4,7 @@ from app.services.workflow_service import workflow_service
 from app.scheduler.job_scheduler import job_scheduler
 from app.models.database import db_manager
 from app.services.analysis_service import analyze_stock
-from app.services.stock_service import detect_market, get_table_name, format_stock_code
+from app.services.stock_service import detect_market, get_table_name, format_stock_code, collect_and_store
 from app.services.resample import resample_ohlcv
 from app.services.chart_service import render_chart_png, render_integrated_dashboard_png
 from app.algos.decision import DecisionEngine
@@ -254,6 +254,34 @@ def stock_chart():
         return jsonify({'success': False, 'message': f'图表渲染失败: {e}'}), 500
 
     return Response(png, mimetype='image/png')
+
+
+@api_bp.route('/refresh', methods=['POST'])
+def refresh_data():
+    """强制刷新所有已注册股票的 5min K 线数据（跳过交易时间检查）。"""
+    df = db_manager.get_all_stock_codes()
+    results = []
+    for _, row in df.iterrows():
+        name = row['name']
+        for market_key, code_col in [('a', 'a_code'), ('hk', 'hk_code'), ('us', 'us_code')]:
+            code = row.get(code_col)
+            if not code or pd.isna(code):
+                continue
+            try:
+                rows = collect_and_store(market_key, code, skip_trading_check=True)
+                results.append({'stock': name, 'market': market_key, 'code': code, 'rows': rows, 'status': 'ok'})
+            except Exception as e:
+                results.append({'stock': name, 'market': market_key, 'code': code, 'rows': 0, 'status': f'error: {e}'})
+    total_rows = sum(r['rows'] for r in results if r['status'] == 'ok')
+    errors = [r for r in results if r['status'] != 'ok']
+    return jsonify({
+        'success': True,
+        'total_stocks': len(df),
+        'total_queries': len(results),
+        'total_rows_inserted': total_rows,
+        'errors': len(errors),
+        'results': results,
+    })
 
 
 @api_bp.route('/health', methods=['GET'])
