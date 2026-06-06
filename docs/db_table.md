@@ -10,6 +10,8 @@
 |----------|------|--------|
 | `metadata/stock_codes.parquet` | 股票名称映射 | 1 |
 | `metadata/registered_stocks.parquet` | 5min 注册记录持久化 | 1 |
+| `metadata/data_jobs.parquet` | 数据拉取 Job 状态 | 1 |
+| `metadata/data_tasks.parquet` | 数据拉取 Task 状态 | 1 |
 | `{market}/{table_name}.parquet` | 5min OHLCV 行情数据 | N（每个市场/股票 1 个） |
 
 完整目录结构：
@@ -18,7 +20,9 @@
 s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地模式)
 ├── metadata/
 │   ├── stock_codes.parquet
-│   └── registered_stocks.parquet
+│   ├── registered_stocks.parquet
+│   ├── data_jobs.parquet
+│   └── data_tasks.parquet
 ├── a/
 │   ├── A_000001.SZ_5min.parquet
 │   ├── A_600519.SS_5min.parquet
@@ -56,7 +60,40 @@ s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地�
 | `created_at` | string | 创建时间（ISO 8601） |
 | `active` | int/bool | 是否活跃 |
 
-## 3. OHLCV 数据 Parquet 文件
+## 3. metadata/data_jobs.parquet 与 metadata/data_tasks.parquet — 数据任务
+
+`data_jobs` 存储一次用户发起的数据拉取请求；`data_tasks` 存储该 Job 下的窗口请求。WebUI 的任务页直接读取这些状态。
+
+`data_jobs` 关键字段：
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| `id` | string | Job ID |
+| `type` | string | 当前为 `backfill` |
+| `status` | string | `queued` / `running` / `completed` / `partial_failed` / `failed` |
+| `progress` | int | 成功 Task 占比 |
+| `stock` | string | 用户输入标的 |
+| `params` | json string | days、窗口、初始数据源等参数 |
+| `estimate` | json string | API 预算 |
+| `result` | json string | 汇总结果 |
+
+`data_tasks` 关键字段：
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| `id` / `job_id` | string | Task ID 与所属 Job ID |
+| `seq` | int | Job 内序号 |
+| `market` / `stock_code` | string | 市场与内部代码 |
+| `source` / `original_source` / `retry_source` | string | 当前数据源、初始数据源、最近重试数据源 |
+| `start_date` / `end_date` | string | 该 Task 的时间窗口 |
+| `status` | string | `pending` / `running` / `success` / `skipped` / `empty` / `failed` |
+| `attempts` | int | 尝试次数 |
+| `rows` / `inserted_rows` / `updated_rows` | int | 返回与写入行数 |
+| `skip_reason` | string | 跳过外部 API 的原因，如本地窗口已有足够完整数据 |
+| `error_summary` | string | 错误摘要 |
+| `attempt_logs` | json string | 每次尝试记录 |
+
+## 4. OHLCV 数据 Parquet 文件
 
 文件路径：`{market}/{MARKET}_{CODE}_5min.parquet`
 
@@ -80,7 +117,7 @@ s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地�
 | `hk/HK_09988.HK_5min.parquet` | 港股 09988 5min |
 | `us/US_BABA.US_5min.parquet` | 美股 BABA 5min |
 
-## 4. 运行时重采样
+## 5. 运行时重采样
 
 `resample_ohlcv(df_5m, target_interval)` 支持：
 
@@ -97,7 +134,7 @@ s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地�
 - 尾部不足桶：`partial_bar=true`
 - 默认交易确认会过滤 90min partial 尾巴，展示路径仍可使用
 
-## 5. 读写机制
+## 6. 读写机制
 
 ```text
 读:  DuckDB → read_parquet('s3://bucket/a/A_000001.SZ_5min.parquet')
@@ -111,7 +148,7 @@ s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地�
 - **OHLCV**：每次写入时读取已有数据 → 合并去重 → 写回 Parquet
 - **本地模式**：不配 `OSS_BUCKET` 时自动使用本地文件路径；写入通过进程内锁串行化，并先写临时 Parquet 后 `os.replace` 原子替换，降低刷新/补历史并发时的文件损坏风险
 
-## 6. 环境变量
+## 7. 环境变量
 
 | 变量 | 说明 |
 |------|------|

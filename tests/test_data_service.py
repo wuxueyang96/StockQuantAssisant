@@ -58,6 +58,18 @@ def test_data_status_endpoint(client, registered_stock):
     assert result['last_timestamp']
 
 
+def test_clear_data_endpoint_keeps_registration(client, registered_stock):
+    resp = client.post('/api/stock/clear-data', json={'stock': '000001'})
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    payload = resp.get_json()
+    result = payload['results'][0]
+    assert payload['rows_cleared'] == 40 * 48
+    assert result['cleared'] is True
+    assert result['registered'] is True
+    assert result['rows_after'] == 0
+
+
 def test_refresh_endpoint_uses_collect_and_store(client, registered_stock, mocker):
     source = mocker.Mock(free_mode=False)
     mocker.patch('app.services.data_service.active_data_source', return_value=source)
@@ -222,6 +234,28 @@ def test_backfill_estimate_akshare_strict_aggregate_includes_window_counts(clien
     detail = payload['results'][0]['api_budget']
     assert detail['request_count'] == 12
     assert detail['window_count'] == 11
+
+
+def test_quality_warning_separates_transport_and_quality_issues():
+    from app.services.data_service import _quality_warning
+
+    warning = _quality_warning({
+        'failed_windows': [{'status': 'failed'}],
+        'empty_windows': [],
+        'failure_summary': [{'count': 1, 'error': 'ssl failed'}],
+        'quality_report': {
+            'issue_count': 0,
+            'daily_check': {
+                'reference_error': True,
+                'error': 'daily ssl failed',
+            },
+        },
+    })
+
+    assert '窗口请求失败' in warning
+    assert '主要错误: ssl failed' in warning
+    assert '日线校验请求失败: daily ssl failed' in warning
+    assert '质量校验发现' not in warning
 
 
 def test_refresh_unregistered_returns_error(client):

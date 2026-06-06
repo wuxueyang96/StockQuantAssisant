@@ -199,6 +199,12 @@ class DatabaseManager:
                 f"COPY {table_name} TO '{url}' (FORMAT PARQUET, OVERWRITE_OR_IGNORE true)"
             )
 
+    def read_metadata_frame(self, table_name: str) -> pd.DataFrame:
+        return self._try_read_parquet(self._meta_url(table_name))
+
+    def write_metadata_frame(self, table_name: str, df: pd.DataFrame):
+        self._write_parquet(df.copy(), self._meta_url(table_name))
+
     # ── OHLCV data ──
 
     def table_exists(self, market: str, table_name: str) -> bool:
@@ -339,6 +345,39 @@ class DatabaseManager:
                 }
             except Exception:
                 return {'rows': 0, 'first_timestamp': None, 'last_timestamp': None}
+
+    def get_range_stats(self, market: str, table_name: str, start_date, end_date) -> dict:
+        url = self._data_url(market, table_name)
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        with self._io_lock:
+            try:
+                row = self._get_conn().execute(
+                    f"SELECT COUNT(*) AS rows, COUNT(DISTINCT CAST(timestamp AS DATE)) AS trading_days, "
+                    f"MIN(timestamp) AS first_timestamp, MAX(timestamp) AS last_timestamp "
+                    f"FROM read_parquet('{url}') WHERE timestamp >= ? AND timestamp <= ?",
+                    [start_ts, end_ts],
+                ).fetchone()
+                if not row:
+                    return {
+                        'rows': 0,
+                        'trading_days': 0,
+                        'first_timestamp': None,
+                        'last_timestamp': None,
+                    }
+                return {
+                    'rows': int(row[0] or 0),
+                    'trading_days': int(row[1] or 0),
+                    'first_timestamp': row[2].isoformat() if row[2] else None,
+                    'last_timestamp': row[3].isoformat() if row[3] else None,
+                }
+            except Exception:
+                return {
+                    'rows': 0,
+                    'trading_days': 0,
+                    'first_timestamp': None,
+                    'last_timestamp': None,
+                }
 
     def get_data(self, market: str, table_name: str, limit: int = 200) -> pd.DataFrame:
         url = self._data_url(market, table_name)

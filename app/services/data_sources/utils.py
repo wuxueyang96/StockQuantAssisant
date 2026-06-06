@@ -21,6 +21,23 @@ def fetch_window_bounds(history_days: int = None, start_date=None, end_date=None
     return start, end
 
 
+def chunk_windows(start, end, chunk_days: int) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    if start_ts > end_ts:
+        return []
+    chunk_days = max(1, int(chunk_days))
+    windows = []
+    cursor = start_ts.normalize()
+    while cursor <= end_ts.normalize():
+        day_end = min(cursor + pd.DateOffset(days=chunk_days - 1), end_ts.normalize())
+        chunk_start = max(cursor, start_ts)
+        chunk_end = min(day_end + pd.Timedelta(hours=23, minutes=59, seconds=59), end_ts)
+        windows.append((chunk_start, chunk_end))
+        cursor = day_end + pd.DateOffset(days=1)
+    return windows
+
+
 def market_tz(market: str) -> str:
     return Config.TRADING_HOURS.get(market, {}).get('tz', 'UTC')
 

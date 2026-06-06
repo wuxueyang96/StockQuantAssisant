@@ -119,6 +119,52 @@ class RegistrationService:
             return True
         return False
 
+    def unregister_stock(self, stock_input: str, *, clear_data: bool = False) -> dict:
+        detections = detect_market(stock_input)
+        results = []
+        for market, stock_code in detections:
+            registration_id = self.get_registration_id(market, stock_code, '5min')
+            data = self.registered_stocks.get(registration_id)
+            if not data:
+                results.append({
+                    'market': market,
+                    'market_label': MARKET_LABEL[market],
+                    'stock_code': stock_code,
+                    'display_code': format_stock_code(market, stock_code),
+                    'registration_id': registration_id,
+                    'deleted': False,
+                    'error': '注册记录不存在',
+                })
+                continue
+
+            rows_cleared = 0
+            if clear_data:
+                stats = db_manager.get_table_stats(market, data['table'])
+                rows_cleared = int(stats.get('rows') or 0)
+                db_manager.drop_table(market, data['table'])
+
+            del self.registered_stocks[registration_id]
+            db_manager.delete_registration_by_id(registration_id)
+            results.append({
+                'market': market,
+                'market_label': MARKET_LABEL[market],
+                'stock_code': stock_code,
+                'display_code': format_stock_code(market, stock_code),
+                'registration_id': registration_id,
+                'deleted': True,
+                'data_cleared': bool(clear_data),
+                'rows_cleared': rows_cleared,
+            })
+
+        return {
+            'success': True,
+            'input': stock_input,
+            'count': len(results),
+            'deleted': int(len([r for r in results if r.get('deleted')])),
+            'rows_cleared': int(sum(int(r.get('rows_cleared') or 0) for r in results)),
+            'results': results,
+        }
+
     def load_registered_stocks(self) -> dict:
         return db_manager.load_registered_stocks()
 

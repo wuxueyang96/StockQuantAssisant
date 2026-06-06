@@ -23,6 +23,30 @@ def active_data_source() -> MarketDataSource:
     return _SOURCES.get(Config.DATA_SOURCE, _SOURCES['akshare'])
 
 
+def data_source_by_name(name: str) -> MarketDataSource:
+    source = _SOURCES.get((name or '').strip().lower())
+    if source is None:
+        raise ValueError(f"未知数据源: {name}")
+    return source
+
+
+def list_data_sources(market: str = None) -> list[dict]:
+    rows = []
+    for name, source in _SOURCES.items():
+        supports = source.supports(market) if market else True
+        configured = True
+        if name == 'itick':
+            configured = bool(Config.ITICK_TOKEN)
+        rows.append({
+            'name': name,
+            'active': name == active_data_source().name,
+            'free_mode': bool(source.free_mode),
+            'configured': configured,
+            'supports_market': bool(supports),
+        })
+    return rows
+
+
 def _fallback_chain(primary: str, market: str) -> list[MarketDataSource]:
     order = {
         'itick': ['itick', 'akshare', 'yfinance'],

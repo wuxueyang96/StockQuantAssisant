@@ -104,6 +104,20 @@ class TestDatabaseManager:
         latest = db.get_latest_timestamp('a', 'A_000012.SZ_daily')
         assert latest is not None
 
+    def test_get_range_stats(self, db):
+        dates = pd.to_datetime(['2024-01-01 09:35', '2024-01-01 09:40', '2024-01-02 09:35'])
+        df = pd.DataFrame({
+            'Open': [10.0] * 3, 'High': [11.0] * 3, 'Low': [9.0] * 3,
+            'Close': [10.5] * 3, 'Volume': [1000000] * 3,
+        }, index=dates)
+        db.insert_data('a', 'A_RANGE.SZ_5min', df)
+
+        stats = db.get_range_stats('a', 'A_RANGE.SZ_5min', '2024-01-01', '2024-01-01 23:59:59')
+
+        assert stats['rows'] == 2
+        assert stats['trading_days'] == 1
+        assert stats['first_timestamp']
+
     def test_empty_insert_returns_zero(self, db):
         df_empty = pd.DataFrame()
         count = db.insert_data('a', 'any_table', df_empty)

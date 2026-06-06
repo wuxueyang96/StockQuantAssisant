@@ -177,17 +177,23 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 | `GET` | `/api/stock/codes` | 查看所有已录入映射 |
 | `POST` | `/api/stock/register` | 注册股票 |
 | `GET` | `/api/stock/data-status` | 查看本地数据起止、行数和日线数量 |
+| `POST` | `/api/stock/clear-data` | 清理已注册股票的本地 5min 数据 |
 | `POST` | `/api/stock/refresh` | 主动刷新已注册股票的最新 5min 数据 |
 | `POST` | `/api/refresh` | 强制刷新所有已录入且已注册的股票 |
 | `GET` | `/api/stock/backfill-estimate` | 估算补历史需要的数据源 API 请求次数 |
 | `POST` | `/api/stock/backfill` | 为已注册股票补历史 5min 数据 |
+| `GET` | `/api/data-jobs` | 查看后台数据 Job 列表 |
 | `GET` | `/api/data-jobs/<id>` | 查询后台数据任务状态 |
+| `GET` | `/api/data-jobs/<id>/tasks` | 查看 Job 下的 Task |
+| `POST` | `/api/data-jobs/<id>/tasks/<task_id>/retry` | 重试单个失败 Task，可指定数据源 |
+| `GET` | `/api/data-sources` | 查看可选数据源 |
 | `POST` | `/api/stock/decision` | 查询量化决策结果 |
 | `GET` | `/api/stock/chart-data` | 获取 WebUI 绘图数据 |
 | `POST` | `/api/stock/backtest` | 回测整合决策结果 |
 | `GET` | `/api/stock/<code>/registrations` | 查看指定股票注册记录 |
 | `GET` | `/api/registered-stocks` | 查看所有已注册股票 |
 | `DELETE` | `/api/registered-stocks/<id>` | 删除注册记录 |
+| `POST` | `/api/stock/unregister` | 按股票代码或名称取消注册 |
 | `GET` | `/api/health` | 健康检查 |
 
 ## 前端控制台
@@ -198,7 +204,7 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 http://127.0.0.1:5000/
 ```
 
-页面直接调用现有 API，支持输入标的分析、注册股票、查看次日交易计划、TradingView 风格行情图、回测收益曲线、交易明细和原始 JSON。行情图上的 BUY/SELL 信号支持 hover 查看当日决策原因。
+页面直接调用现有 API，支持输入标的分析、注册股票、查看次日交易计划、TradingView 风格行情图、数据 Job/Task 列表、回测收益曲线、交易明细和原始 JSON。行情图上的 BUY/SELL 信号支持 hover 查看当日决策原因；补历史数据默认创建后台 Job，Job 下的每个时间窗口 Task 可单独查看和重试，重试时可选择数据源。数据状态区提供清理本地数据和取消注册操作。
 
 ## 回测系统
 
@@ -219,14 +225,15 @@ http://127.0.0.1:5000/
 已注册股票支持两类手动数据维护：
 
 - **刷新最新数据**：`POST /api/stock/refresh`，拉取最近小窗口并只写入最新增量；`POST /api/refresh` 可批量刷新所有已录入且已注册的股票。
-- **补历史数据**：`POST /api/stock/backfill`，`days` 表示向前补的交易日数量；系统会换算为更大的自然日请求窗口。默认 AkShare 严格模式会按 `AKSHARE_BACKFILL_CHUNK_DAYS` 拆成多个请求，合并去重后按实际交易日截断，并返回窗口执行情况、分钟条数检查和日线校验报告。
+- **补历史数据**：`POST /api/stock/backfill`，`days` 表示向前补的交易日数量；系统会换算为更大的自然日请求窗口。WebUI 默认以 `queued=true` 创建后台 Job，并按 `AKSHARE_BACKFILL_CHUNK_DAYS` 拆成多个 Task；每个 Task 对应一个时间窗口，执行前会检查本地窗口数据，已有足够完整数据时标记为 `skipped` 并跳过 API 请求；成功后立即 upsert 写入，失败或空返回可在任务页选择数据源后重试。同步补历史接口仍保留 AkShare 严格模式的窗口报告和质量校验报告。
+- **清理数据 / 取消注册**：清理数据只删除本地 5min K 线并保留注册记录；取消注册只删除注册记录，默认不删除本地数据。按 registration id 删除时可使用 `clear_data=true` 同时清理数据。
 
 注意：AkShare 是免费数据源，分钟历史能否完整返回取决于 AkShare 与其上游接口；严格模式会尽量慢速分段请求并把空窗口、失败窗口和校验差异明确返回。iTick 会返回每个市场常规交易时段内的 5min K 线；A 股可能包含开盘集合/开盘 K，系统会保留常规时段数据并由重采样层处理尾部 partial bar。未配置 iTick token 或 iTick 请求失败时，系统会回退到 akshare / yfinance，其中 yfinance 5m 常限制最近 60 天。
 
 ## 数据存储
 
 - **格式**：Parquet 列存（列裁剪 + 谓词下推，远程查询只传输需要的行/列）
-- **元数据**：`metadata/stock_codes.parquet` + `metadata/registered_stocks.parquet`
+- **元数据**：`metadata/stock_codes.parquet` + `metadata/registered_stocks.parquet` + `metadata/data_jobs.parquet` + `metadata/data_tasks.parquet`
 - **OHLCV**：`{market}/{table_name}.parquet`，每股票一个文件（5min 粒度）
 - **读取**：DuckDB `read_parquet('s3://...')` 远程直读
 - **写入**：DuckDB `COPY ... TO 's3://...' (FORMAT PARQUET)` 远程直写

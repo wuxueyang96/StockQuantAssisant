@@ -9,6 +9,7 @@ from app.services.chart_data_service import build_chart_data
 from app.services.data_job_service import data_job_service
 from app.services.data_service import (
     backfill_data,
+    clear_stock_data,
     estimate_backfill_api_usage,
     get_data_status,
     refresh_all_registered,
@@ -167,6 +168,20 @@ def stock_data_status():
         return jsonify({'success': False, 'message': f'数据状态查询失败: {str(e)}'}), 500
 
 
+@api_bp.route('/stock/clear-data', methods=['POST'])
+def stock_clear_data():
+    data = request.get_json() or {}
+    stock = (data.get('stock') or '').strip()
+    if not stock:
+        return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
+    try:
+        return jsonify(clear_stock_data(stock))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'清理数据失败: {str(e)}'}), 500
+
+
 @api_bp.route('/stock/refresh', methods=['POST'])
 def stock_refresh():
     data = request.get_json() or {}
@@ -212,6 +227,7 @@ def stock_backfill():
                 days=days,
                 start_date=data.get('start_date'),
                 end_date=data.get('end_date'),
+                source=data.get('source'),
             )
             return jsonify({
                 'success': True,
@@ -256,6 +272,58 @@ def get_data_job(job_id):
     return jsonify({'success': True, 'job': job})
 
 
+@api_bp.route('/data-jobs', methods=['GET'])
+def list_data_jobs():
+    try:
+        limit = request.args.get('limit')
+        limit = int(limit) if limit not in (None, '') else 50
+        jobs = data_job_service.list_jobs(
+            status=(request.args.get('status') or '').strip() or None,
+            stock=(request.args.get('stock') or '').strip() or None,
+            limit=limit,
+        )
+        return jsonify({'success': True, 'count': len(jobs), 'jobs': jobs})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'任务列表查询失败: {str(e)}'}), 500
+
+
+@api_bp.route('/data-jobs/<job_id>/tasks', methods=['GET'])
+def list_data_job_tasks(job_id):
+    try:
+        tasks = data_job_service.get_tasks(job_id)
+        return jsonify({'success': True, 'job_id': job_id, 'count': len(tasks), 'tasks': tasks})
+    except KeyError:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Task 查询失败: {str(e)}'}), 500
+
+
+@api_bp.route('/data-jobs/<job_id>/tasks/<task_id>/retry', methods=['POST'])
+def retry_data_task(job_id, task_id):
+    data = request.get_json() or {}
+    try:
+        task = data_job_service.retry_task(
+            job_id,
+            task_id,
+            source=(data.get('source') or '').strip() or None,
+        )
+        return jsonify({'success': True, 'task': task})
+    except KeyError:
+        return jsonify({'success': False, 'message': 'Task 不存在'}), 404
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Task 重试失败: {str(e)}'}), 500
+
+
+@api_bp.route('/data-sources', methods=['GET'])
+def list_sources():
+    return jsonify({
+        'success': True,
+        'sources': data_job_service.data_sources((request.args.get('market') or '').strip() or None),
+    })
+
+
 @api_bp.route('/stock/<stock_code>/registrations', methods=['GET'])
 def get_stock_registrations(stock_code):
     registrations = registration_service.get_stock_registrations(stock_code)
@@ -278,11 +346,40 @@ def get_all_registered_stocks():
 
 @api_bp.route('/registered-stocks/<registration_id>', methods=['DELETE'])
 def delete_registered_stock(registration_id):
+    clear_data = str(request.args.get('clear_data') or '').lower() in ('1', 'true', 'yes')
+    rows_cleared = 0
+    registration = registration_service.registered_stocks.get(registration_id)
+    if registration and clear_data:
+        stats = db_manager.get_table_stats(registration['market'], registration['table'])
+        rows_cleared = int(stats.get('rows') or 0)
+        db_manager.drop_table(registration['market'], registration['table'])
     deleted = registration_service.delete_registration(registration_id)
 
     if deleted:
-        return jsonify({'success': True, 'message': f'注册股票 {registration_id} 已删除'})
+        return jsonify({
+            'success': True,
+            'message': f'注册股票 {registration_id} 已删除',
+            'data_cleared': clear_data,
+            'rows_cleared': rows_cleared,
+        })
     return jsonify({'success': False, 'message': f'注册股票 {registration_id} 不存在'}), 404
+
+
+@api_bp.route('/stock/unregister', methods=['POST'])
+def unregister_stock():
+    data = request.get_json() or {}
+    stock = (data.get('stock') or '').strip()
+    if not stock:
+        return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
+    try:
+        return jsonify(registration_service.unregister_stock(
+            stock,
+            clear_data=bool(data.get('clear_data')),
+        ))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'取消注册失败: {str(e)}'}), 500
 
 
 def _parse_bars(default: int = 180) -> int:

@@ -8,6 +8,9 @@ const state = {
   btCharts: [],
   btRenderFrame: null,
   dataJobPoll: null,
+  selectedJobId: null,
+  dataJobs: [],
+  dataSources: [],
   tv: {
     priceChart: null,
     macdChart: null,
@@ -337,7 +340,10 @@ function renderDataStatus(result) {
       rows.push(['请求窗口', `${fmt(report.completed_windows, '0')}/${fmt(report.window_count, '0')}`]);
       rows.push(['请求次数', report.request_count]);
       rows.push(['分钟缺口', minute.issue_count || 0]);
-      rows.push(['日线校验', daily.checked ? `${daily.issue_count || 0} 个问题` : (daily.error || '--')]);
+      const dailyText = daily.checked
+        ? `${daily.issue_count || 0} 个问题`
+        : (daily.skipped ? '已跳过' : (daily.error ? '失败' : '--'));
+      rows.push(['日线校验', dailyText]);
     }
     if (result.warning) rows.push(['提示', result.warning]);
   }
@@ -417,6 +423,60 @@ async function refreshStockData() {
   }
 }
 
+async function clearStockData() {
+  const stock = $('stockInput').value.trim();
+  if (!stock) return;
+  if (!window.confirm(`确认清理 ${stock} 的本地 5min 数据？注册记录会保留。`)) return;
+  setBusy(true);
+  setMessage('清理数据中');
+  try {
+    const resp = await fetch('/api/stock/clear-data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stock }),
+    });
+    const payload = await resp.json();
+    if (!resp.ok || payload.success === false) {
+      throw new Error(payload.message || '清理数据失败');
+    }
+    const first = (payload.results || [])[0];
+    renderDataStatus(first);
+    setMessage(`清理完成，删除 ${fmt(payload.rows_cleared, '0')} 行本地数据`);
+    await loadChartData(false);
+    await loadBackfillEstimate();
+  } catch (err) {
+    setMessage(err.message || String(err), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function unregisterCurrentStock() {
+  const stock = $('stockInput').value.trim();
+  if (!stock) return;
+  if (!window.confirm(`确认取消注册 ${stock}？本地数据不会被删除。`)) return;
+  setBusy(true);
+  setMessage('取消注册中');
+  try {
+    const resp = await fetch('/api/stock/unregister', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stock, clear_data: false }),
+    });
+    const payload = await resp.json();
+    if (!resp.ok || payload.success === false) {
+      throw new Error(payload.message || '取消注册失败');
+    }
+    renderDataStatus((payload.results || [])[0]);
+    setMessage(`取消注册完成，删除 ${fmt(payload.deleted, '0')} 条注册记录`);
+    await loadWatchlist();
+  } catch (err) {
+    setMessage(err.message || String(err), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function backfillStockData() {
   const stock = $('stockInput').value.trim();
   if (!stock) return;
@@ -437,6 +497,8 @@ async function backfillStockData() {
     if (payload.queued) {
       renderApiBudgetFromEstimate(payload.estimate);
       setMessage(`补历史任务已入队，预计 API ${apiBudgetText(payload.estimate?.api_budget)}`);
+      activateTab('tasks');
+      await loadDataJobs(payload.job_id);
       pollDataJob(payload.job_id);
       return;
     }
@@ -472,23 +534,24 @@ function pollDataJob(jobId) {
         throw new Error(payload.message || '任务查询失败');
       }
       const job = payload.job;
+      await loadDataJobs(job.id);
       if (job.status === 'queued' || job.status === 'running') {
         const label = job.status === 'queued' ? '排队中' : '运行中';
-        setMessage(`补历史任务${label}，预计 API ${apiBudgetText(job.estimate?.api_budget)}`);
+        setMessage(`补历史任务${label}，进度 ${fmt(job.progress, '0')}%，成功 ${fmt(job.success_tasks, '0')}/${fmt(job.total_tasks, '0')}`);
         state.dataJobPoll = setTimeout(poll, 3000);
         return;
       }
       if (job.status === 'failed') {
-        setMessage(job.error || '补历史任务失败', 'error');
+        setMessage(job.error || '补历史任务失败，可在任务页重试失败 Task', 'error');
         return;
       }
-      if (job.status === 'completed') {
+      if (job.status === 'completed' || job.status === 'partial_failed') {
         const first = (job.result?.results || [])[0];
         renderDataStatus(first);
         if (first?.error) throw new Error(first.error);
         const inserted = fmt(first?.inserted_rows, '0');
         const updated = fmt(first?.updated_rows, '0');
-        const partial = first?.partial ? '；数据源只返回了部分窗口' : '';
+        const partial = job.status === 'partial_failed' ? '；部分 Task 失败，可在任务页重试' : '';
         const message = first?.warning || `补历史完成，新增 ${inserted} 行，覆盖 ${updated} 行${partial}`;
         setMessage(message);
         await loadChartData(false);
@@ -499,6 +562,203 @@ function pollDataJob(jobId) {
     }
   };
   poll();
+}
+
+function jobStatusLabel(status) {
+  return {
+    queued: '排队',
+    running: '运行',
+    completed: '完成',
+    partial_failed: '部分失败',
+    failed: '失败',
+    pending: '等待',
+    success: '成功',
+    empty: '空返回',
+    skipped: '已存在',
+  }[status] || fmt(status);
+}
+
+function statusPill(status) {
+  const span = document.createElement('span');
+  span.className = `status-pill ${status || ''}`;
+  span.textContent = jobStatusLabel(status);
+  return span;
+}
+
+function progressBar(value) {
+  const track = document.createElement('div');
+  track.className = 'progress-track';
+  const fill = document.createElement('div');
+  fill.className = 'progress-fill';
+  fill.style.width = `${Math.max(0, Math.min(100, Number(value || 0)))}%`;
+  track.appendChild(fill);
+  return track;
+}
+
+async function loadDataJobs(selectJobId = null) {
+  const resp = await fetch('/api/data-jobs?limit=50');
+  const payload = await resp.json();
+  if (!resp.ok || payload.success === false) {
+    throw new Error(payload.message || '任务列表查询失败');
+  }
+  state.dataJobs = payload.jobs || [];
+  if (selectJobId) state.selectedJobId = selectJobId;
+  if (!state.selectedJobId && state.dataJobs.length) {
+    state.selectedJobId = state.dataJobs[0].id;
+  }
+  renderDataJobs();
+  const selected = state.dataJobs.find((job) => job.id === state.selectedJobId);
+  if (selected) {
+    await loadDataJobDetail(selected.id);
+  } else {
+    renderDataJobDetail(null);
+  }
+}
+
+function renderDataJobs() {
+  const root = $('dataJobList');
+  if (!root) return;
+  root.textContent = '';
+  if (!state.dataJobs.length) {
+    root.textContent = '暂无任务';
+    return;
+  }
+  state.dataJobs.forEach((job) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `data-job-card ${job.id === state.selectedJobId ? 'is-active' : ''}`;
+    const title = document.createElement('strong');
+    title.textContent = `${job.stock || '--'} / ${job.type || '--'}`;
+    const meta = document.createElement('div');
+    meta.className = 'job-card-meta';
+    meta.append(statusPill(job.status));
+    const progress = document.createElement('span');
+    progress.textContent = `${fmt(job.progress, '0')}%`;
+    const count = document.createElement('span');
+    count.textContent = `成功 ${fmt(job.success_tasks, '0')}/${fmt(job.total_tasks, '0')}`;
+    const time = document.createElement('span');
+    time.textContent = shortDate(job.updated_at || job.created_at);
+    meta.append(progress, count, time);
+    btn.append(title, progressBar(job.progress), meta);
+    btn.addEventListener('click', async () => {
+      state.selectedJobId = job.id;
+      renderDataJobs();
+      await loadDataJobDetail(job.id);
+    });
+    root.appendChild(btn);
+  });
+}
+
+async function loadDataJobDetail(jobId) {
+  const resp = await fetch(`/api/data-jobs/${encodeURIComponent(jobId)}`);
+  const payload = await resp.json();
+  if (!resp.ok || payload.success === false) {
+    throw new Error(payload.message || '任务详情查询失败');
+  }
+  renderDataJobDetail(payload.job);
+}
+
+function renderDataJobDetail(job) {
+  const detail = $('dataJobDetail');
+  const body = $('dataTaskTableBody');
+  if (!detail || !body) return;
+  detail.textContent = '';
+  body.textContent = '';
+  if (!job) {
+    detail.textContent = '请选择一个 Job';
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 8;
+    cell.textContent = '暂无 Task';
+    row.appendChild(cell);
+    body.appendChild(row);
+    return;
+  }
+  const meta = document.createElement('div');
+  meta.className = 'task-meta';
+  meta.append(statusPill(job.status));
+  [
+    `进度 ${fmt(job.progress, '0')}%`,
+    `成功 ${fmt(job.success_tasks, '0')}`,
+    `已存在 ${fmt(job.skipped_tasks, '0')}`,
+    `失败 ${fmt(job.failed_tasks, '0')}`,
+    `空返回 ${fmt(job.empty_tasks, '0')}`,
+    `新增 ${fmt(job.inserted_rows, '0')}`,
+    `覆盖 ${fmt(job.updated_rows, '0')}`,
+  ].forEach((text) => {
+    const span = document.createElement('span');
+    span.textContent = text;
+    meta.appendChild(span);
+  });
+  detail.appendChild(meta);
+
+  const tasks = job.tasks || [];
+  if (!tasks.length) {
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.colSpan = 8;
+    cell.textContent = '暂无 Task';
+    row.appendChild(cell);
+    body.appendChild(row);
+    return;
+  }
+  tasks.forEach((task) => {
+    const row = document.createElement('tr');
+    const retryable = task.status === 'failed' || task.status === 'empty';
+    const sourceSelect = document.createElement('select');
+    sourceSelect.className = 'task-source-select';
+    (task.available_sources || []).forEach((source) => {
+      const opt = document.createElement('option');
+      opt.value = source.name;
+      opt.textContent = `${source.name}${source.configured === false ? ' / 未配置' : ''}`;
+      opt.selected = source.name === task.source;
+      sourceSelect.appendChild(opt);
+    });
+    sourceSelect.disabled = !retryable;
+
+    const retryBtn = document.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.textContent = '重试';
+    retryBtn.disabled = !retryable;
+    retryBtn.addEventListener('click', () => retryDataTask(job.id, task.id, sourceSelect.value));
+
+    [
+      task.seq,
+      `${fullDate(task.start_date)} - ${fullDate(task.end_date)}`,
+      sourceSelect,
+      statusPill(task.status),
+      fmt(task.rows, '0'),
+      `${fmt(task.inserted_rows, '0')} / ${fmt(task.updated_rows, '0')}`,
+      task.error_summary || task.skip_reason || '--',
+      retryBtn,
+    ].forEach((value, idx) => {
+      const td = document.createElement('td');
+      if (value instanceof HTMLElement) td.appendChild(value);
+      else td.textContent = value;
+      if (idx === 6) td.className = 'task-error';
+      row.appendChild(td);
+    });
+    body.appendChild(row);
+  });
+}
+
+async function retryDataTask(jobId, taskId, source) {
+  try {
+    const resp = await fetch(`/api/data-jobs/${encodeURIComponent(jobId)}/tasks/${encodeURIComponent(taskId)}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+    const payload = await resp.json();
+    if (!resp.ok || payload.success === false) {
+      throw new Error(payload.message || 'Task 重试失败');
+    }
+    setMessage(`Task 已使用 ${source} 重新入队`);
+    await loadDataJobs(jobId);
+    pollDataJob(jobId);
+  } catch (err) {
+    setMessage(err.message || String(err), 'error');
+  }
 }
 
 function canvasContext(canvas) {
@@ -1690,6 +1950,7 @@ function activateTab(name) {
   });
   if (name === 'chart') renderCharts();
   if (name === 'backtest') renderBacktestCharts();
+  if (name === 'tasks') loadDataJobs().catch((err) => setMessage(err.message || String(err), 'error'));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1703,6 +1964,9 @@ document.addEventListener('DOMContentLoaded', () => {
   $('backtestBtn').addEventListener('click', () => runBacktest(true));
   $('refreshBtn').addEventListener('click', refreshStockData);
   $('backfillDataBtn').addEventListener('click', backfillStockData);
+  $('clearDataBtn').addEventListener('click', clearStockData);
+  $('unregisterStockBtn').addEventListener('click', unregisterCurrentStock);
+  $('refreshJobsBtn').addEventListener('click', () => loadDataJobs().catch((err) => setMessage(err.message || String(err), 'error')));
   $('backfillDaysInput').addEventListener('change', loadBackfillEstimate);
   $('backtestForm').addEventListener('submit', (event) => {
     event.preventDefault();

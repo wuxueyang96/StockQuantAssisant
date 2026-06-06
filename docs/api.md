@@ -159,6 +159,27 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 | `stock` | string | 是 | — | 股票代码或名称 |
 | `history_days` | int | 否 | 7 | 本次刷新向前请求的数据窗口 |
 
+### POST /stock/clear-data
+
+清理已注册股票的本地 5min 数据，保留注册记录。清理后可以继续通过刷新或补历史重新拉取数据。
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `stock` | string | 是 | — | 股票代码或名称 |
+
+### POST /stock/unregister
+
+按股票代码或名称取消注册。默认只删除注册记录，不删除本地 5min 数据；如需同时删除数据，可传 `clear_data=true`。
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `stock` | string | 是 | — | 股票代码或名称 |
+| `clear_data` | bool | 否 | false | 是否同时清理本地 5min 数据 |
+
+### DELETE /registered-stocks/{registration_id}
+
+按注册 ID 删除注册记录。可传 query 参数 `clear_data=true` 同时清理对应本地 5min 数据。
+
 ### POST /refresh
 
 强制刷新所有已录入代码映射且已经注册的股票。该接口来自 PR #2 的全量刷新能力，当前实现复用 `data_service.refresh_market`，因此会遵守统一数据源接口、free mode、数据状态和 API 预算统计。
@@ -223,8 +244,9 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 | `start_date` | string | 否 | — | 指定历史开始日期 |
 | `end_date` | string | 否 | — | 指定历史结束日期 |
 | `queued` | bool | 否 | false | 为 true 时创建后台数据任务并立即返回 `job_id` |
+| `source` | string | 否 | 当前主数据源 | queued 模式下 Job 初始 Task 使用的数据源 |
 
-返回字段包含 `requested_trading_days`、`request_calendar_days`、`inserted_rows`、`updated_rows`、`rows_before`、`rows_after`、`source_first_timestamp`、`source_last_timestamp`、`source_trading_days` 和 `partial`。AkShare 严格模式额外返回：
+同步调用时返回字段包含 `requested_trading_days`、`request_calendar_days`、`inserted_rows`、`updated_rows`、`rows_before`、`rows_after`、`source_first_timestamp`、`source_last_timestamp`、`source_trading_days` 和 `partial`。AkShare 严格模式额外返回：
 
 | 字段 | 说明 |
 |------|------|
@@ -234,12 +256,15 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 | `strict_report.daily_request_count` | 日线校验请求次数 |
 | `strict_report.window_count` / `completed_windows` | 分钟窗口总数与成功窗口数 |
 | `strict_report.failed_windows` / `empty_windows` | 失败或空返回窗口，最多返回前 50 个 |
+| `strict_report.failure_summary` | 按错误文本聚合的窗口请求失败原因 |
+| `strict_report.transport_issue_count` | 窗口请求失败和日线参考请求失败数量 |
 | `quality_report.minute` | 每个交易日 5min bar 数量检查；A 股默认期望 48 根 |
 | `quality_report.daily_check` | 将分钟聚合成日线后，与 AkShare 日线接口返回值对比 |
+| `quality_report.issue_count` | 仅统计分钟条数、日线价格/成交量差异等数据质量问题，不统计 SSL/网络请求失败 |
 
 ### GET /data-jobs/{job_id}
 
-查询后台数据任务状态。WebUI 在数据源 free mode 下用它轮询补历史任务。
+查询后台数据 Job 状态。WebUI 用它轮询补历史任务。一个 Job 表示一次数据拉取，一个 Job 下包含多个 Task；每个 Task 对应一个时间窗口和一次数据源请求。
 
 **响应** `200`
 ```json
@@ -259,6 +284,34 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
   }
 }
 ```
+
+### GET /data-jobs
+
+查询后台数据 Job 列表。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `status` | string | 否 | — | 按 Job 状态过滤 |
+| `stock` | string | 否 | — | 按输入标的模糊过滤 |
+| `limit` | int | 否 | 50 | 返回数量 |
+
+### GET /data-jobs/{job_id}/tasks
+
+查询指定 Job 下的 Task。Task 字段包含 `source`、`original_source`、`retry_source`、`start_date`、`end_date`、`status`、`attempts`、`rows`、`inserted_rows`、`updated_rows`、`skip_reason` 和 `error_summary`。Task 执行前会检查本地窗口数据；如果已有足够完整的 5min 数据，状态会变为 `skipped`，不再请求外部数据源。
+
+### POST /data-jobs/{job_id}/tasks/{task_id}/retry
+
+重试单个失败或空返回 Task。可在请求体中指定本次重试使用的数据源；不传则沿用该 Task 上一次使用的数据源。
+
+```json
+{
+  "source": "yfinance"
+}
+```
+
+### GET /data-sources
+
+查看可选数据源。可选参数 `market=a|hk|us` 用于返回每个数据源是否支持该市场；iTick 会额外标识 token 是否已配置。
 
 ---
 

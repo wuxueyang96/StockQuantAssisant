@@ -354,6 +354,44 @@ class TestAkshareSource:
         assert estimate['daily_request_count'] == 1
         assert estimate['request_count'] == 12
 
+    def test_strict_fetch_skips_daily_check_when_minute_windows_fail(self, mocker):
+        from app.services.data_sources.akshare_source import AkshareDataSource
+        from app.services.data_sources.base import FetchRequest
+
+        def minute_df(symbol, period, start_date, end_date, adjust):
+            raise RuntimeError('[SSL: DECRYPTION_FAILED_OR_BAD_RECORD_MAC] bad record mac')
+
+        daily_mock = mocker.Mock()
+        fake_ak = types.SimpleNamespace(
+            stock_zh_a_hist_min_em=minute_df,
+            stock_zh_a_hist=daily_mock,
+        )
+        mocker.patch.dict(sys.modules, {'akshare': fake_ak})
+        mocker.patch('app.services.data_sources.akshare_source.is_available', return_value=True)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_BACKFILL_CHUNK_DAYS', 3)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_BACKFILL_RETRIES', 0)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_BACKFILL_CHUNK_DELAY_SECONDS', 0)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_DAILY_CHECK', True)
+
+        report = AkshareDataSource().fetch_5m_strict(FetchRequest(
+            market='a',
+            stock_code='000001',
+            start_date='2024-01-01',
+            end_date='2024-01-10 15:00:00',
+        ))
+
+        assert report['df'].empty
+        assert report['failed_windows']
+        assert report['minute_request_count'] == report['window_count']
+        assert report['daily_request_count'] == 0
+        assert report['request_count'] == report['window_count']
+        assert report['transport_issue_count'] == report['window_count']
+        assert report['failure_summary'][0]['count'] == report['window_count']
+        assert report['quality_report']['issue_count'] == 0
+        assert report['quality_report']['daily_check']['skipped'] is True
+        assert report['quality_report']['daily_check']['skip_reason'] == 'minute_data_empty'
+        daily_mock.assert_not_called()
+
 
 class TestInitialHistoryWindow:
     def test_config_uses_200_days_for_5min(self):

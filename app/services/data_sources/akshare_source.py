@@ -9,7 +9,7 @@ import pandas as pd
 
 from app.config import Config
 from app.services.data_sources.base import FetchRequest, MarketDataSource
-from app.services.data_sources.utils import fetch_window_bounds, format_fetch_window
+from app.services.data_sources.utils import chunk_windows, fetch_window_bounds, format_fetch_window
 
 logger = logging.getLogger(__name__)
 
@@ -84,23 +84,6 @@ def _display_ts(value) -> str:
     return pd.Timestamp(value).isoformat()
 
 
-def _chunk_windows(start, end, chunk_days: int) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    if start_ts > end_ts:
-        return []
-    chunk_days = max(1, int(chunk_days))
-    windows = []
-    cursor = start_ts.normalize()
-    while cursor <= end_ts.normalize():
-        day_end = min(cursor + pd.DateOffset(days=chunk_days - 1), end_ts.normalize())
-        chunk_start = max(cursor, start_ts)
-        chunk_end = min(day_end + pd.Timedelta(hours=23, minutes=59, seconds=59), end_ts)
-        windows.append((chunk_start, chunk_end))
-        cursor = day_end + pd.DateOffset(days=1)
-    return windows
-
-
 def _expected_min_bars(market: str) -> int:
     if market == 'a':
         return int(Config.AKSHARE_EXPECTED_A_5MIN_BARS)
@@ -167,6 +150,30 @@ def _timestamp_for_index(value, index: pd.Index) -> pd.Timestamp:
     if ts.tzinfo is not None:
         return ts.tz_localize(None)
     return ts
+
+
+def _compact_error(error, limit: int = 240) -> str:
+    text = ' '.join(str(error or '').split())
+    if len(text) <= limit:
+        return text
+    return f'{text[:limit - 3]}...'
+
+
+def _failure_summary(windows: list[dict]) -> list[dict]:
+    counts: dict[str, dict] = {}
+    for window in windows:
+        error = _compact_error(window.get('error'))
+        if not error:
+            continue
+        if error not in counts:
+            counts[error] = {
+                'error': error,
+                'count': 0,
+                'sample_start': window.get('start'),
+                'sample_end': window.get('end'),
+            }
+        counts[error]['count'] += 1
+    return sorted(counts.values(), key=lambda item: item['count'], reverse=True)[:10]
 
 
 class AkshareDataSource(MarketDataSource):
@@ -302,12 +309,16 @@ class AkshareDataSource(MarketDataSource):
         }
         if not Config.AKSHARE_DAILY_CHECK:
             return report
+        if df is None or df.empty:
+            report['skipped'] = True
+            report['skip_reason'] = 'minute_data_empty'
+            return report
         try:
             report['request_count'] = 1
             daily = self._fetch_daily(request.market, request.stock_code, start, end)
         except Exception as exc:
-            report['error'] = str(exc)
-            report['issue_count'] = 1
+            report['error'] = _compact_error(exc)
+            report['reference_error'] = True
             return report
 
         if daily.empty:
@@ -368,7 +379,7 @@ class AkshareDataSource(MarketDataSource):
         retries = max(0, int(Config.AKSHARE_BACKFILL_RETRIES))
         retry_sleep = max(0.0, float(Config.AKSHARE_BACKFILL_RETRY_SLEEP_SECONDS))
         chunk_delay = max(0.0, float(Config.AKSHARE_BACKFILL_CHUNK_DELAY_SECONDS))
-        windows = _chunk_windows(start, end, chunk_days)
+        windows = chunk_windows(start, end, chunk_days)
         frames = []
         window_reports = []
         request_count = 0
@@ -427,8 +438,8 @@ class AkshareDataSource(MarketDataSource):
         quality_issue_count = (
             int(minute_quality.get('issue_count') or 0)
             + int(daily_check.get('issue_count') or 0)
-            + len(failed)
         )
+        transport_issue_count = len(failed) + (1 if daily_check.get('reference_error') else 0)
         return {
             'df': df_all,
             'data_source': self.name,
@@ -440,6 +451,8 @@ class AkshareDataSource(MarketDataSource):
             'completed_windows': int(len([w for w in window_reports if w['status'] == 'ok'])),
             'failed_windows': failed[:50],
             'empty_windows': empty[:50],
+            'failure_summary': _failure_summary(failed),
+            'transport_issue_count': int(transport_issue_count),
             'windows': window_reports,
             'quality_report': {
                 'start_date': _display_date(start),

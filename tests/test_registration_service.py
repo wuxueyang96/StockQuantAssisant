@@ -102,6 +102,20 @@ class TestRegistrationService:
         assert registration_service.delete_registration('A_000001.SZ_5min') is True
         assert registration_service.delete_registration('A_000001.SZ_5min') is False
 
+    def test_unregister_stock_can_clear_data(self, registration_service, mock_deps):
+        mock_detect, mock_db = mock_deps
+        mock_detect.return_value = [('a', '000001')]
+        mock_db.get_table_stats.return_value = {'rows': 123}
+        mock_db.drop_table = MagicMock()
+
+        registration_service.register_stock('000001')
+        result = registration_service.unregister_stock('000001', clear_data=True)
+
+        assert result['deleted'] == 1
+        assert result['rows_cleared'] == 123
+        assert 'A_000001.SZ_5min' not in registration_service.registered_stocks
+        mock_db.drop_table.assert_called_once_with('a', 'A_000001.SZ_5min')
+
     def test_table_name_matches_registration_id(self, registration_service, mock_deps):
         mock_detect, _ = mock_deps
         mock_detect.return_value = [('a', '000001')]

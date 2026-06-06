@@ -345,6 +345,137 @@ button:focus-visible {
   overflow: auto;
 }
 
+.tasks-panel.is-active {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.tasks-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tasks-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.job-list-panel,
+.task-list-panel {
+  min-height: 0;
+  overflow: hidden;
+  margin-bottom: 0;
+}
+
+.data-job-list {
+  display: grid;
+  gap: 8px;
+  max-height: 100%;
+  overflow: auto;
+}
+
+.data-job-card {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  text-align: left;
+  padding: 10px;
+}
+
+.data-job-card.is-active {
+  border-color: var(--ink);
+  background: #f6f7f1;
+}
+
+.data-job-card strong,
+.task-meta strong {
+  overflow-wrap: anywhere;
+}
+
+.job-card-meta,
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progress-track {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: #eceee7;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--green);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 0 8px;
+  background: #eceee7;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.status-pill.running,
+.status-pill.queued {
+  background: #e8f1f5;
+  color: var(--blue);
+}
+
+.status-pill.completed,
+.status-pill.success,
+.status-pill.skipped {
+  background: #e7f4ee;
+  color: var(--green);
+}
+
+.status-pill.failed,
+.status-pill.partial_failed,
+.status-pill.empty {
+  background: #fff0ee;
+  color: var(--red);
+}
+
+.job-detail-empty {
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.task-table-wrap {
+  max-height: calc(100vh - 240px);
+  overflow: auto;
+}
+
+.task-table select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  padding: 0 8px;
+}
+
+.task-error {
+  max-width: 340px;
+  overflow-wrap: anywhere;
+}
+
 .decision-strip {
   display: flex;
   align-items: center;

@@ -124,12 +124,18 @@ def _quality_warning(report: dict) -> Optional[str]:
     parts = []
     failed = report.get('failed_windows') or []
     empty = report.get('empty_windows') or []
+    failure_summary = report.get('failure_summary') or []
     quality = report.get('quality_report') or {}
+    daily_check = quality.get('daily_check') or {}
     issue_count = int(quality.get('issue_count') or 0)
     if failed:
-        parts.append(f"严格补数有 {len(failed)} 个窗口失败")
+        parts.append(f"严格补数有 {len(failed)} 个窗口请求失败")
+        if failure_summary:
+            parts.append(f"主要错误: {failure_summary[0].get('error')}")
     if empty:
         parts.append(f"有 {len(empty)} 个窗口返回空数据")
+    if daily_check.get('reference_error'):
+        parts.append(f"日线校验请求失败: {daily_check.get('error')}")
     if issue_count:
         parts.append(f"质量校验发现 {issue_count} 个问题")
     return '；'.join(parts) if parts else None
@@ -201,6 +207,35 @@ def get_data_status(stock_input: str) -> dict:
         'input': stock_input,
         'count': len(detections),
         'results': [data_status_for_market(m, c) for m, c in detections],
+    }
+
+
+def clear_market_data(market: str, stock_code: str) -> dict:
+    record = data_status_for_market(market, stock_code)
+    if not record['registered']:
+        record['error'] = '该股票尚未注册，不能清理数据'
+        return record
+    rows_before = int(record.get('rows') or 0)
+    db_manager.drop_table(market, record['table'])
+    after = data_status_for_market(market, stock_code)
+    after.update({
+        'cleared': True,
+        'rows_cleared': rows_before,
+        'rows_before': rows_before,
+        'rows_after': int(after.get('rows') or 0),
+    })
+    return after
+
+
+def clear_stock_data(stock_input: str) -> dict:
+    detections = detect_market(stock_input)
+    results = [clear_market_data(m, c) for m, c in detections]
+    return {
+        'success': True,
+        'input': stock_input,
+        'count': len(results),
+        'rows_cleared': int(sum(int(r.get('rows_cleared') or 0) for r in results)),
+        'results': results,
     }
 
 

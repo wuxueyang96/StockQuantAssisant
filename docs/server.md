@@ -12,11 +12,16 @@ StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台
 - `GET /api/stock/chart-data`：返回 WebUI 绘图用 JSON。
 - `POST /api/stock/backtest`：回测整合决策，输出收益曲线、回撤、仓位和交易明细。
 - `GET /api/stock/data-status`：查看本地 5min 数据状态。
+- `POST /api/stock/clear-data`：清理已注册股票的本地 5min 数据。
 - `POST /api/stock/refresh`：主动刷新已注册股票的最新数据。
 - `POST /api/refresh`：强制刷新所有已录入且已注册的股票。
 - `GET /api/stock/backfill-estimate`：估算补历史需要的数据源 API 请求次数。
 - `POST /api/stock/backfill`：为已注册股票补历史数据。
-- `GET /api/data-jobs/<id>`：查询后台数据任务状态。
+- `GET /api/data-jobs` / `/api/data-jobs/<id>`：查询后台数据 Job 列表和状态。
+- `GET /api/data-jobs/<id>/tasks`：查询 Job 下的窗口 Task。
+- `POST /api/data-jobs/<id>/tasks/<task_id>/retry`：重试单个失败 Task，可指定数据源。
+- `GET /api/data-sources`：查询可选数据源。
+- `POST /api/stock/unregister`：按股票代码或名称取消注册。
 - `POST /api/stock/code` / `GET /api/stock/codes`：维护股票名称与市场代码映射。
 - `GET /api/health`：健康检查。
 
@@ -88,8 +93,11 @@ s3://{bucket}/
 
 - `POST /api/stock/refresh`：刷新单个已注册股票。
 - `POST /api/refresh`：刷新所有已录入且已注册的股票。
-- `POST /api/stock/backfill`：补历史数据，按 timestamp upsert 合并；`days` 表示交易日数量。
+- `POST /api/stock/backfill`：补历史数据，按 timestamp upsert 合并；`days` 表示交易日数量；WebUI 默认以后台 Job/Task 方式执行。
 - 默认 AkShare 补历史启用严格模式：先把交易日换算为保守自然日窗口，再按 `AKSHARE_BACKFILL_CHUNK_DAYS` 分段请求，最后返回窗口执行情况、分钟条数检查和日线校验报告。
+- 后台 Job 会将每个分段窗口保存为 Task，Task 成功后立即写入数据；失败或空返回 Task 可在 WebUI 任务页选择数据源后重试。
+- Task 执行前会检查本地窗口数据，已有足够完整数据时标记为 `skipped`，不再请求外部 API。
+- `POST /api/stock/clear-data` 只清理本地 K 线，不删除注册；`POST /api/stock/unregister` 只取消注册，除非显式传 `clear_data=true`。
 - iTick 固定按免费额度限速；AkShare / yfinance 由数据源自身限制决定。
 - 高周期 K 线由 `app/services/resample.py` 合成：按交易日分组、按日内 K 线序号切桶，不跨日合并。
 - 90min 最后一根不足 18 根 5min 时标记 `partial_bar=true`，默认只用于展示，不参与结构交易确认。

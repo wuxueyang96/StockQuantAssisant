@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StockQuant 控制台</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=20260606-registered-stocks">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=20260606-data-maintenance">
 </head>
 <body>
   <div class="app-shell">
@@ -253,6 +253,45 @@
           <section class="tab-panel workspace-panel json-panel" id="panel-json">
             <pre id="jsonOutput">{}</pre>
           </section>
+
+          <section class="tab-panel workspace-panel tasks-panel" id="panel-tasks">
+            <div class="tasks-header">
+              <div>
+                <span class="eyebrow">Data Jobs</span>
+                <h2>任务列表</h2>
+              </div>
+              <button type="button" id="refreshJobsBtn">刷新任务</button>
+            </div>
+            <div class="tasks-layout">
+              <section class="job-list-panel panel">
+                <div class="section-title">Job</div>
+                <div id="dataJobList" class="data-job-list">暂无任务</div>
+              </section>
+              <section class="task-list-panel panel">
+                <div class="section-title">Task</div>
+                <div id="dataJobDetail" class="job-detail-empty">请选择一个 Job</div>
+                <div class="table-wrap task-table-wrap">
+                  <table class="trade-table task-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>窗口</th>
+                        <th>数据源</th>
+                        <th>状态</th>
+                        <th>行数</th>
+                        <th>写入</th>
+                        <th>错误</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="dataTaskTableBody">
+                      <tr><td colspan="8">暂无 Task</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </section>
         </section>
 
         <div class="view-tabs-bar">
@@ -261,6 +300,7 @@
             <button class="tab" data-tab="plan" type="button">计划</button>
             <button class="tab" data-tab="backtest" type="button">回测</button>
             <button class="tab" data-tab="json" type="button">JSON</button>
+            <button class="tab" data-tab="tasks" type="button">任务</button>
           </div>
         </div>
       </section>
@@ -322,6 +362,8 @@
             </label>
             <div class="api-budget" id="apiBudget">补历史预计 API: --</div>
             <button type="button" id="backfillDataBtn">补历史数据</button>
+            <button type="button" id="clearDataBtn">清理数据</button>
+            <button type="button" id="unregisterStockBtn">取消注册</button>
           </div>
         </section>
 
@@ -334,6 +376,6 @@
   </div>
 
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=20260606-registered-stocks" defer></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=20260606-data-maintenance" defer></script>
 </body>
 </html>

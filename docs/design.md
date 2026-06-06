@@ -66,24 +66,30 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 | `/stock/codes` | GET | 查看所有映射 |
 | `/stock/register` | POST | 注册股票 |
 | `/stock/data-status` | GET | 查询本地数据状态 |
+| `/stock/clear-data` | POST | 清理本地 5min 数据，保留注册 |
 | `/stock/refresh` | POST | 主动刷新最新数据 |
 | `/refresh` | POST | 强制刷新所有已录入且已注册股票 |
 | `/stock/backfill-estimate` | GET | 估算补历史 API 请求次数 |
 | `/stock/backfill` | POST | 补历史 5min 数据 |
-| `/data-jobs/<id>` | GET | 查询后台数据任务状态 |
+| `/data-jobs` | GET | 查询后台数据 Job 列表 |
+| `/data-jobs/<id>` | GET | 查询后台数据 Job 状态 |
+| `/data-jobs/<id>/tasks` | GET | 查询 Job 下的 Task |
+| `/data-jobs/<id>/tasks/<task_id>/retry` | POST | 重试单个 Task，可指定数据源 |
+| `/data-sources` | GET | 查询可选数据源 |
 | `/stock/decision` | POST | 查询量化决策结果 |
 | `/stock/chart-data` | GET | 返回 WebUI 绘图 JSON |
 | `/stock/backtest` | POST | 回测整合决策 |
 | `/stock/<code>/registrations` | GET | 查询指定股票注册记录 |
 | `/registered-stocks` | GET | 查看所有已注册股票 |
 | `/registered-stocks/<id>` | DELETE | 删除注册记录 |
+| `/stock/unregister` | POST | 按股票代码或名称取消注册 |
 | `/health` | GET | 健康检查 |
 
 ### 3.2.1 前端控制台 — templates / static
 
 - `app/templates/index.html`：单页控制台入口，访问 `/`。
 - `app/static/css/app.css`：页面布局与视觉样式。
-- `app/static/js/app.js`：直接调用现有 API，支持标的分析、注册股票、查看三层次日计划、TradingView Lightweight Charts 行情图、回测和原始 JSON。BUY/SELL 信号支持 hover 查看当日决策原因。
+- `app/static/js/app.js`：直接调用现有 API，支持标的分析、注册股票、查看三层次日计划、TradingView Lightweight Charts 行情图、数据 Job/Task 列表、Task 数据源选择重试、回测和原始 JSON。BUY/SELL 信号支持 hover 查看当日决策原因。
 - 前端不引入 Node/Vite/Webpack 等构建链，部署方式与原 Flask 服务一致。
 
 ### 3.3 Service 层
@@ -123,6 +129,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 - `register_stock(input)` → `detect_market` → 为每个市场创建 1 个 5min 注册记录
 - `get_stock_registrations / get_all_registered_stocks` → 查询
 - `delete_registration(registration_id)` → 从内存和 DB 中删除
+- `unregister_stock(stock_input, clear_data=False)` → 按股票代码或名称取消注册，可选同时清理本地 5min 数据
 - 注册信息持久化到 `metadata/registered_stocks.parquet`，启动时自动加载恢复
 - 注册不会自动请求外部数据源；数据只通过刷新/补历史接口维护
 
@@ -137,9 +144,17 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 #### data_service.py
 
 - `get_data_status` — 返回本地 5min 数据行数、起止时间、日线数量和注册状态。
+- `clear_stock_data` — 清理已注册股票的本地 5min 数据，保留注册记录。
 - `refresh_data` — 面向已注册股票，拉取最近小窗口并通过 `insert_data` 增量写入。
 - `refresh_all_registered` — 强制刷新所有已录入代码映射且已注册的股票。
 - `backfill_data` — 面向已注册股票，拉取指定历史窗口并通过 `upsert_data` 合并补齐旧数据；默认 AkShare 严格模式会附带 `strict_report` 和 `quality_report`。
+
+#### data_job_service.py
+
+- `enqueue_backfill` — 将一次补历史请求创建为一个持久化 Job，并按 `AKSHARE_BACKFILL_CHUNK_DAYS` 拆成多个窗口 Task。
+- Worker 顺序执行 Task；执行前先检查本地窗口数据，已有足够完整数据时标记 `skipped` 并跳过外部 API；Task 成功后立即 `upsert_data` 写入本地 5min 表，并更新 Job 成功数和进度。
+- Task 失败或空返回会保留错误摘要，可通过 API/WebUI 单独重试；重试时可以指定数据源，显式重试不走 fallback。
+- Job/Task 元数据持久化到 `metadata/data_jobs.parquet` 和 `metadata/data_tasks.parquet`，服务重启后可查看历史任务；重启时遗留的 running Task 会标记为失败。
 
 #### resample.py
 
@@ -219,7 +234,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 `DatabaseManager` 基于 DuckDB 内存引擎 + httpfs 扩展，实现 Parquet on OSS 存算分离：
 
 - **OHLCV 数据**：每个 stock/market 一个 Parquet 文件，路径 `{market}/{table_name}.parquet`
-- **元数据**（stock_codes / registered_stocks）：存储于 `metadata/` 目录下 Parquet 文件，启动时加载到 DuckDB 内存表，写操作实时刷新
+- **元数据**（stock_codes / registered_stocks / data_jobs / data_tasks）：存储于 `metadata/` 目录下 Parquet 文件，启动时加载到 DuckDB 内存表或任务服务内存状态，写操作实时刷新
 - 方法：`table_exists` / `insert_data` / `get_data` / `upsert_stock_code` / `save_registration` / `load_registered_stocks` 等
 
 ### 3.6 部署 — Parquet on OSS
@@ -230,7 +245,9 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 s3://{bucket}/
 ├── metadata/
 │   ├── stock_codes.parquet
-│   └── registered_stocks.parquet
+│   ├── registered_stocks.parquet
+│   ├── data_jobs.parquet
+│   └── data_tasks.parquet
 ├── a/
 │   ├── A_600519.SS_5min.parquet
 │   └── A_000001.SZ_5min.parquet

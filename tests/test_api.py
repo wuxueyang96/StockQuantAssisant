@@ -8,10 +8,12 @@ class TestAPI:
     def setup_mocks(self):
         with patch('app.api.routes.registration_service') as mock_registration, \
              patch('app.api.routes.db_manager') as mock_db, \
-             patch('app.api.routes.analyze_stock') as mock_analyze:
+             patch('app.api.routes.analyze_stock') as mock_analyze, \
+             patch('app.api.routes.clear_stock_data') as mock_clear_data:
             self.mock_registration = mock_registration
             self.mock_db = mock_db
             self.mock_analyze = mock_analyze
+            self.mock_clear_data = mock_clear_data
             yield
 
     def test_health_check(self, client):
@@ -37,6 +39,9 @@ class TestAPI:
         assert 'stockNameInput' in text
         assert 'registerByNameBtn' in text
         assert '补历史数据' in text
+        assert 'dataJobList' in text
+        assert 'dataTaskTableBody' in text
+        assert '任务列表' in text
         assert '代码映射' not in text
 
     def test_register_stock_success(self, client):
@@ -153,6 +158,43 @@ class TestAPI:
         self.mock_registration.delete_registration.return_value = False
         resp = client.delete('/api/registered-stocks/nonexistent')
         assert resp.status_code == 404
+
+    def test_clear_data_route(self, client):
+        self.mock_clear_data.return_value = {
+            'success': True,
+            'rows_cleared': 10,
+            'results': [],
+        }
+        resp = client.post('/api/stock/clear-data', json={'stock': '000001'})
+        assert resp.status_code == 200
+        assert resp.get_json()['rows_cleared'] == 10
+        self.mock_clear_data.assert_called_once_with('000001')
+
+    def test_unregister_stock_route(self, client):
+        self.mock_registration.unregister_stock.return_value = {
+            'success': True,
+            'deleted': 1,
+            'results': [],
+        }
+        resp = client.post('/api/stock/unregister', json={'stock': '000001', 'clear_data': True})
+        assert resp.status_code == 200
+        assert resp.get_json()['deleted'] == 1
+        self.mock_registration.unregister_stock.assert_called_once_with('000001', clear_data=True)
+
+    def test_data_jobs_routes(self, client, mocker):
+        service = mocker.patch('app.api.routes.data_job_service')
+        service.list_jobs.return_value = [{'id': 'job1', 'status': 'queued'}]
+        service.get_job.return_value = {'id': 'job1', 'status': 'queued', 'tasks': []}
+        service.get_tasks.return_value = [{'id': 'task1', 'status': 'failed'}]
+        service.retry_task.return_value = {'id': 'task1', 'status': 'pending', 'source': 'yfinance'}
+        service.data_sources.return_value = [{'name': 'akshare'}, {'name': 'yfinance'}]
+
+        assert client.get('/api/data-jobs').get_json()['count'] == 1
+        assert client.get('/api/data-jobs/job1').get_json()['job']['id'] == 'job1'
+        assert client.get('/api/data-jobs/job1/tasks').get_json()['count'] == 1
+        retry = client.post('/api/data-jobs/job1/tasks/task1/retry', json={'source': 'yfinance'})
+        assert retry.get_json()['task']['source'] == 'yfinance'
+        assert client.get('/api/data-sources?market=a').get_json()['sources'][0]['name'] == 'akshare'
 
     def test_registration_ids_follow_format(self, client):
         self.mock_registration.register_stock.return_value = {
