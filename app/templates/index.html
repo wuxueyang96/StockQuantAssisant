@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StockQuant 控制台</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=20260606-trend-values">
 </head>
 <body>
   <div class="app-shell">
@@ -19,8 +19,253 @@
       </div>
     </header>
 
-    <main class="workspace">
-      <aside class="sidebar">
+    <main class="workspace terminal-workspace">
+      <section class="content terminal-main">
+        <div class="notice" id="message" hidden></div>
+
+        <section class="content-panels">
+          <section class="tab-panel chart-panel is-active" id="panel-chart">
+          <div class="chart-toolbar terminal-chartbar">
+            <div>
+              <span class="eyebrow">Market Chart</span>
+              <h2 id="chartTitle">行情图</h2>
+            </div>
+            <div class="segmented chart-intervals" aria-label="图表周期">
+              <button type="button" class="segment is-active" data-chart-interval="daily">日线</button>
+              <button type="button" class="segment" data-chart-interval="60min">60m</button>
+              <button type="button" class="segment" data-chart-interval="90min">90m</button>
+              <button type="button" class="segment" data-chart-interval="120min">120m</button>
+            </div>
+            <label>
+              <span>交易日</span>
+              <input id="chartDaysInput" type="number" min="1" max="500" value="60">
+            </label>
+          </div>
+          <div class="chart-stack tv-chart-shell" id="chartStack">
+            <div class="tv-symbol-line">
+              <div class="tv-symbol-main">
+                <strong id="chartSymbol">--</strong>
+                <span id="chartIntervalLabel">日线</span>
+              </div>
+              <div class="tv-data-window" id="chartLegend"></div>
+              <a class="tv-attribution" href="https://www.tradingview.com/" target="_blank" rel="noreferrer">Lightweight Charts(TM)</a>
+            </div>
+            <div class="tv-legend-strip" aria-label="图表图例">
+              <span class="legend-group">OHLCV</span>
+              <span>O 开盘</span>
+              <span>H 最高</span>
+              <span>L 最低</span>
+              <span>C 收盘</span>
+              <span>V 成交量</span>
+              <span class="legend-separator"></span>
+              <span class="legend-item"><i class="legend-swatch line red"></i>短期上轨</span>
+              <span class="legend-item"><i class="legend-swatch line green"></i>短期下轨</span>
+              <span class="legend-item"><i class="legend-swatch line amber dashed"></i>长期上轨</span>
+              <span class="legend-item"><i class="legend-swatch line blue dashed"></i>长期下轨</span>
+              <span class="legend-separator"></span>
+              <span class="legend-group">MACD</span>
+              <span class="legend-item"><i class="legend-swatch line blue"></i>DIF</span>
+              <span class="legend-item"><i class="legend-swatch line amber"></i>DEA</span>
+              <span class="legend-item"><i class="legend-swatch bar green"></i>Hist 正</span>
+              <span class="legend-item"><i class="legend-swatch bar red"></i>Hist 负</span>
+            </div>
+            <section class="tv-pane price-pane">
+              <div class="pane-label" id="priceChartLabel">价格 / 趋势 / 信号</div>
+              <div class="tv-chart-surface" id="priceChart"></div>
+            </section>
+            <section class="tv-pane macd-pane">
+              <div class="pane-label" id="macdChartLabel">MACD</div>
+              <div class="tv-chart-surface" id="macdChart"></div>
+            </section>
+            <div class="fallback-canvas">
+              <section class="canvas-panel price-panel">
+                <div class="canvas-title" id="fallbackPriceChartLabel">价格 / 趋势 / 信号</div>
+                <div class="canvas-surface price-surface">
+                  <canvas id="priceCanvas" height="520"></canvas>
+                </div>
+              </section>
+              <section class="canvas-panel macd-panel">
+                <div class="canvas-title" id="fallbackMacdChartLabel">结构 MACD</div>
+                <div class="canvas-surface macd-surface">
+                  <canvas id="macdCanvas" height="220"></canvas>
+                </div>
+              </section>
+            </div>
+            <div class="empty-chart" id="chartEmpty">暂无图表</div>
+          </div>
+          </section>
+
+          <section class="tab-panel workspace-panel" id="panel-plan">
+            <div class="decision-strip">
+              <div>
+                <span class="eyebrow">Next Day Plan</span>
+                <h1 id="planTitle">等待分析</h1>
+              </div>
+              <span class="action-badge" id="actionBadge">WAIT</span>
+            </div>
+
+            <div class="summary-band">
+              <div>
+                <span>执行日</span>
+                <strong id="executeDate">--</strong>
+              </div>
+              <div>
+                <span>当前仓位</span>
+                <strong id="actualPosition">--</strong>
+              </div>
+              <div>
+                <span>订单差值</span>
+                <strong id="orderDelta">--</strong>
+              </div>
+              <div>
+                <span>置信标签</span>
+                <strong id="confidenceLabel">--</strong>
+              </div>
+            </div>
+
+            <div class="split-layout">
+              <section class="panel">
+                <div class="section-title">趋势层</div>
+                <div class="kv-list" id="trendList"></div>
+              </section>
+              <section class="panel">
+                <div class="section-title">结构层</div>
+                <div class="kv-list" id="structureList"></div>
+              </section>
+              <section class="panel">
+                <div class="section-title">序列层</div>
+                <div class="kv-list" id="sequenceList"></div>
+              </section>
+            </div>
+
+            <section class="panel execution-panel">
+              <div class="section-title">执行纪律</div>
+              <div class="rule-block">
+                <span>原则</span>
+                <p id="principle">--</p>
+              </div>
+              <div class="rule-block">
+                <span>禁止动作</span>
+                <p id="forbiddenActions">--</p>
+              </div>
+              <div class="rule-block">
+                <span>失效条件</span>
+                <p id="invalidation">--</p>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="section-title">解释</div>
+              <ol class="explanation" id="explanation"></ol>
+            </section>
+          </section>
+
+          <section class="tab-panel workspace-panel" id="panel-backtest">
+            <form class="backtest-form panel" id="backtestForm">
+              <label>
+                <span>开始日期</span>
+                <input id="btStart" type="date">
+              </label>
+              <label>
+                <span>结束日期</span>
+                <input id="btEnd" type="date">
+              </label>
+              <label>
+                <span>初始资金</span>
+                <input id="btCash" type="number" min="1000" step="1000" value="100000">
+              </label>
+              <label>
+                <span>手续费率</span>
+                <input id="btCommission" type="number" min="0" step="0.0001" value="0.0003">
+              </label>
+              <label>
+                <span>滑点 bps</span>
+                <input id="btSlippage" type="number" min="0" step="1" value="5">
+              </label>
+              <label>
+                <span>最小日线</span>
+                <input id="btMinBars" type="number" min="30" step="1" value="90">
+              </label>
+              <label>
+                <span>整手数量</span>
+                <input id="btLotSize" type="number" min="1" step="1" value="100">
+              </label>
+              <button type="submit" class="primary-btn">运行回测</button>
+            </form>
+
+            <section class="metric-grid backtest-metrics" aria-label="回测指标">
+              <div class="metric"><span>总收益</span><strong id="btTotalReturn">--</strong></div>
+              <div class="metric"><span>超额收益</span><strong id="btExcessReturn">--</strong></div>
+              <div class="metric"><span>最大回撤</span><strong id="btMaxDrawdown">--</strong></div>
+              <div class="metric"><span>Sharpe</span><strong id="btSharpe">--</strong></div>
+              <div class="metric"><span>交易次数</span><strong id="btTradeCount">--</strong></div>
+              <div class="metric"><span>胜率</span><strong id="btWinRate">--</strong></div>
+            </section>
+
+            <div class="backtest-charts">
+              <section class="canvas-panel">
+                <div class="canvas-title">策略权益 / 买入持有（金额）</div>
+                <div class="bt-chart-surface" id="btEquityChart"></div>
+                <div class="canvas-surface" style="height: 260px;">
+                  <canvas id="equityCanvas" height="260"></canvas>
+                </div>
+              </section>
+              <section class="canvas-panel">
+                <div class="canvas-title">回撤（%）</div>
+                <div class="bt-chart-surface compact" id="btDrawdownChart"></div>
+                <div class="canvas-surface" style="height: 180px;">
+                  <canvas id="drawdownCanvas" height="180"></canvas>
+                </div>
+              </section>
+              <section class="canvas-panel">
+                <div class="canvas-title">仓位（%）</div>
+                <div class="bt-chart-surface compact" id="btPositionChart"></div>
+                <div class="canvas-surface" style="height: 180px;">
+                  <canvas id="positionCanvas" height="180"></canvas>
+                </div>
+              </section>
+            </div>
+
+            <section class="panel">
+              <div class="section-title">成交明细</div>
+              <div class="table-wrap">
+                <table class="trade-table">
+                  <thead>
+                    <tr>
+                      <th>信号日</th>
+                      <th>成交日</th>
+                      <th>成交方向</th>
+                      <th>成交价</th>
+                      <th>数量</th>
+                      <th>成交额</th>
+                      <th>目标仓位(0-10)</th>
+                      <th>已实现盈亏</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tradeTableBody">
+                    <tr><td colspan="8">暂无交易</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+
+          <section class="tab-panel workspace-panel json-panel" id="panel-json">
+            <pre id="jsonOutput">{}</pre>
+          </section>
+        </section>
+
+        <div class="view-tabs-bar">
+          <div class="tabs dock-tabs" role="tablist">
+            <button class="tab is-active" data-tab="chart" type="button">图表</button>
+            <button class="tab" data-tab="plan" type="button">计划</button>
+            <button class="tab" data-tab="backtest" type="button">回测</button>
+            <button class="tab" data-tab="json" type="button">JSON</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="sidebar terminal-side">
         <form class="query-form" id="decisionForm">
           <label for="stockInput">标的</label>
           <div class="input-row">
@@ -31,6 +276,7 @@
             <button type="button" id="registerBtn">注册</button>
             <button type="button" id="chartBtn">图表</button>
           </div>
+          <button type="button" id="backtestBtn">回测</button>
         </form>
 
         <section class="metric-grid" aria-label="核心指标">
@@ -52,110 +298,29 @@
           </div>
         </section>
 
+        <section class="panel data-panel">
+          <div class="section-title">数据状态</div>
+          <div class="kv-list" id="dataStatusList"></div>
+          <div class="data-actions">
+            <button type="button" id="refreshBtn">刷新数据</button>
+            <label>
+              <span>向前补交易日</span>
+              <input id="backfillDaysInput" type="number" min="1" max="500" value="200">
+            </label>
+            <div class="api-budget" id="apiBudget">补历史预计 API: --</div>
+            <button type="button" id="backfillDataBtn">补历史数据</button>
+          </div>
+        </section>
+
         <section class="watchlist">
-          <div class="section-title">代码映射</div>
+          <div class="section-title">已注册股票</div>
           <div id="watchlist" class="watchlist-items"></div>
         </section>
       </aside>
-
-      <section class="content">
-        <div class="tabs" role="tablist">
-          <button class="tab is-active" data-tab="plan" type="button">计划</button>
-          <button class="tab" data-tab="chart" type="button">图表</button>
-          <button class="tab" data-tab="json" type="button">JSON</button>
-        </div>
-
-        <div class="notice" id="message" hidden></div>
-
-        <section class="tab-panel is-active" id="panel-plan">
-          <div class="decision-strip">
-            <div>
-              <span class="eyebrow">Next Day Plan</span>
-              <h1 id="planTitle">等待分析</h1>
-            </div>
-            <span class="action-badge" id="actionBadge">WAIT</span>
-          </div>
-
-          <div class="summary-band">
-            <div>
-              <span>执行日</span>
-              <strong id="executeDate">--</strong>
-            </div>
-            <div>
-              <span>当前仓位</span>
-              <strong id="actualPosition">--</strong>
-            </div>
-            <div>
-              <span>订单差值</span>
-              <strong id="orderDelta">--</strong>
-            </div>
-            <div>
-              <span>置信标签</span>
-              <strong id="confidenceLabel">--</strong>
-            </div>
-          </div>
-
-          <div class="split-layout">
-            <section class="panel">
-              <div class="section-title">趋势层</div>
-              <div class="kv-list" id="trendList"></div>
-            </section>
-            <section class="panel">
-              <div class="section-title">结构层</div>
-              <div class="kv-list" id="structureList"></div>
-            </section>
-            <section class="panel">
-              <div class="section-title">序列层</div>
-              <div class="kv-list" id="sequenceList"></div>
-            </section>
-          </div>
-
-          <section class="panel execution-panel">
-            <div class="section-title">执行纪律</div>
-            <div class="rule-block">
-              <span>原则</span>
-              <p id="principle">--</p>
-            </div>
-            <div class="rule-block">
-              <span>禁止动作</span>
-              <p id="forbiddenActions">--</p>
-            </div>
-            <div class="rule-block">
-              <span>失效条件</span>
-              <p id="invalidation">--</p>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="section-title">解释</div>
-            <ol class="explanation" id="explanation"></ol>
-          </section>
-        </section>
-
-        <section class="tab-panel chart-panel" id="panel-chart">
-          <div class="chart-toolbar">
-            <div>
-              <span class="eyebrow">Integrated Chart</span>
-              <h2 id="chartTitle">行情图</h2>
-            </div>
-            <label>
-              <span>Bars</span>
-              <input id="barsInput" type="number" min="20" max="500" value="90">
-            </label>
-          </div>
-          <div class="chart-frame">
-            <img id="chartImage" alt="集成行情图">
-            <div class="empty-chart" id="chartEmpty">暂无图表</div>
-          </div>
-        </section>
-
-        <section class="tab-panel" id="panel-json">
-          <pre id="jsonOutput">{}</pre>
-        </section>
-      </section>
     </main>
   </div>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+  <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=20260606-trend-values" defer></script>
 </body>
 </html>

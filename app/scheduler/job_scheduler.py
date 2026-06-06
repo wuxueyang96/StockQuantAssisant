@@ -16,6 +16,9 @@ class JobScheduler:
     def add_workflow_job(self, workflow_id: str, workflow_data: dict):
         if workflow_id in self.jobs:
             return
+        if not Config.AUTO_COLLECT_ENABLED:
+            logger.info(f"自动采集已关闭，跳过定时任务: {workflow_id}")
+            return
 
         market = workflow_data['market']
         stock_code = workflow_data['stock_code']

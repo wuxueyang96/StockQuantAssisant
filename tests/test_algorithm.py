@@ -177,18 +177,14 @@ class TestTrendChannel:
         assert thresholds['long_upper'] > thresholds['long_lower']
         assert isinstance(thresholds['short_upper'], float)
 
-    def test_short_upper_uses_ema_of_rolling_max_high(self, trend):
-        """short_upper 应该等于 EMA(RollingMax(High, N_s), N_s) × (1 + offset)。
-
-        algorithm.md §一 规定：先用滚动窗口取过去 N 根 K 线的最高价，再对
-        该极值序列做 EMA。直接对 High 求 EMA 会退化成普通均线，必须避免。
-        """
+    def test_short_upper_uses_ema_of_rolling_max_close(self, trend):
+        """short_upper 默认使用 Close 的滚动最大值。"""
         np.random.seed(7)
         n = 200
         closes = np.full(n, 100.0)
-        highs = closes.copy()
         for i in range(0, n, 5):
-            highs[i] = 110.0
+            closes[i] = 110.0
+        highs = closes + 2.0
         lows = closes - 1.0
         opens = closes.copy()
         df = pd.DataFrame({
@@ -197,13 +193,15 @@ class TestTrendChannel:
         }, index=pd.date_range('2024-01-01', periods=n, freq='B'))
 
         N = trend.short_period
-        rolling_max = df['High'].rolling(N, min_periods=1).max()
+        rolling_max = df['Close'].rolling(N, min_periods=1).max()
         expected = rolling_max.ewm(span=N, adjust=False).mean() * (1 + trend.offset_pct)
 
         result = trend.compute_all(df)
         np.testing.assert_array_almost_equal(
             result['short_upper'].values[-50:], expected.values[-50:], decimal=4
         )
+        high_based = df['High'].rolling(N, min_periods=1).max().ewm(span=N, adjust=False).mean() * (1 + trend.offset_pct)
+        assert not np.allclose(result['short_upper'].values[-50:], high_based.values[-50:])
 
     def test_short_lower_uses_ema_of_rolling_min_low(self, trend):
         np.random.seed(7)
@@ -244,7 +242,7 @@ class TestTrendChannel:
         }, index=pd.date_range('2024-01-01', periods=n, freq='B'))
 
         N = trend.long_period
-        exp_upper = df['High'].rolling(N, min_periods=1).max().ewm(span=N, adjust=False).mean() * (1 + trend.offset_pct)
+        exp_upper = df['Close'].rolling(N, min_periods=1).max().ewm(span=N, adjust=False).mean() * (1 + trend.offset_pct)
         exp_lower = df['Low'].rolling(N, min_periods=1).min().ewm(span=N, adjust=False).mean() * (1 - trend.offset_pct)
 
         result = trend.compute_all(df)

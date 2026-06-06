@@ -29,6 +29,16 @@ class TestAPI:
         assert 'StockQuant' in text
         assert '/static/css/app.css' in text
         assert '/static/js/app.js' in text
+        assert 'chartDaysInput' in text
+        assert '交易日' in text
+        assert 'lightweight-charts' in text
+        assert 'priceChart' in text
+        assert 'chartLegend' in text
+        assert 'refreshBtn' in text
+        assert 'backfillDataBtn' in text
+        assert '已注册股票' in text
+        assert '补历史数据' in text
+        assert '代码映射' not in text
 
     def test_register_stock_success(self, client):
         self.mock_ws.register_stock.return_value = {

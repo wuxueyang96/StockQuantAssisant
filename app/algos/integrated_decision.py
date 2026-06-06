@@ -555,17 +555,32 @@ def evaluate_integrated_dataframe(
         'action', 'signal_strength', 'confidence_label', 'structure_adjustment',
         'high9_active', 'low9_active',
     ]
+    object_cols = {'trend_state', 'action', 'confidence_label'}
+    bool_cols = {'high9_active', 'low9_active'}
     for c in cols:
-        result[c] = np.nan if c not in ('action', 'confidence_label') else None
+        if c in object_cols:
+            result[c] = None
+        elif c in bool_cols:
+            result[c] = False
+        else:
+            result[c] = np.nan
 
     carried_actual: Optional[float] = None
 
     for i in range(n):
         sub_daily = df_daily.iloc[: i + 1]
         sub_intra = {}
+        as_of_day = pd.Timestamp(sub_daily.index[-1]).date()
         for k, df_i in intraday.items():
             if df_i is not None and len(df_i) > 0:
-                mask = df_i.index <= sub_daily.index[-1]
+                # Daily bars are indexed by the first 5min bar of the trading
+                # day.  For backtests we still need all intraday structure bars
+                # from that same day, so compare by trading date instead of the
+                # raw timestamp.
+                mask = pd.Series(
+                    pd.to_datetime(df_i.index).date <= as_of_day,
+                    index=df_i.index,
+                )
                 sub = df_i.loc[mask]
                 if len(sub) >= 30:
                     sub_intra[k] = sub

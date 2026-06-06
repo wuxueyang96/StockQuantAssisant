@@ -8,8 +8,10 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 - [健康检查](#健康检查)
 - [股票代码映射](#股票代码映射)
 - [工作流注册](#工作流注册)
+- [数据维护](#数据维护)
 - [量化决策](#量化决策)
 - [行情图表](#行情图表)
+- [回测](#回测)
 - [工作流查询](#工作流查询)
 
 ---
@@ -24,7 +26,7 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 
 - 输入股票代码或名称并调用 `POST /api/stock/decision` 获取三层次日计划
 - 调用 `POST /api/stock/register` 注册 5min 数据工作流
-- 展示 `next_day_plan`、趋势/结构/序列分层信息、执行纪律、集成图表和原始 JSON
+- 展示 `next_day_plan`、趋势/结构/序列分层信息、执行纪律、WebUI 图表、回测结果和原始 JSON
 
 **响应** `200` — `text/html`
 
@@ -111,6 +113,138 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 **响应** `200` — 已存在：`"message": "工作流已存在"`，其余同新创建。
 
 **响应** `400` — 名称未录入：提示先调用 `POST /api/stock/code` 录入映射。
+
+---
+
+## 数据维护
+
+### GET /stock/data-status
+
+查看本地 5min Parquet 数据状态。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `stock` | string | 是 | 股票代码或名称 |
+
+**响应** `200`
+```json
+{
+  "success": true,
+  "input": "300274",
+  "count": 1,
+  "results": [{
+    "display_code": "300274.SZ",
+    "registered": true,
+    "table": "A_300274.SZ_5min",
+    "rows": 1488,
+    "daily_bars": 31,
+    "first_timestamp": "2026-04-21T09:35:00+08:00",
+    "last_timestamp": "2026-06-05T14:55:00+08:00",
+    "data_source": "itick",
+    "itick_free_mode": true,
+    "refresh_api_budget": {
+      "request_count": 1,
+      "estimated_seconds": 0
+    }
+  }]
+}
+```
+
+### POST /stock/refresh
+
+主动刷新已注册股票的最新 5min 数据。当前主数据源为 iTick 且 `ITICK_FREE_MODE=true` 时固定只请求最新一页，并通过本地 `latest_timestamp` 过滤新增行；关闭 free mode 后才使用 `history_days` 窗口刷新。该接口通过统一数据源接口拉取数据，未来切换主数据源时 API 语义不变。
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `stock` | string | 是 | — | 股票代码或名称 |
+| `history_days` | int | 否 | 7 | 本次刷新向前请求的数据窗口 |
+
+### POST /refresh
+
+强制刷新所有已录入代码映射且已经注册 5min 工作流的股票。该接口来自 PR #2 的全量刷新能力，当前实现复用 `data_service.refresh_market`，因此会遵守统一数据源接口、free mode、数据状态和 API 预算统计。
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `history_days` | int | 否 | 7 | 关闭 free mode 后的刷新窗口；free mode 下仍只请求最新一页 |
+
+**响应** `200`
+```json
+{
+  "success": true,
+  "total_stocks": 3,
+  "total_queries": 3,
+  "total_rows_inserted": 42,
+  "errors": 0,
+  "api_budget": {
+    "data_source": "itick",
+    "free_mode": true,
+    "request_count": 3,
+    "estimated_seconds": 26
+  },
+  "results": []
+}
+```
+
+### GET /stock/backfill-estimate
+
+估算补历史会消耗的数据源 API 请求次数，不会请求外部数据源。iTick 会返回分页、free mode 限速和预计秒数；其他数据源返回统一的预算结构。
+
+| 参数 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `stock` | string | 是 | — | 股票代码或名称 |
+| `days` | int | 否 | 200 | 向前补的交易日数量 |
+
+**响应** `200`
+```json
+{
+  "success": true,
+  "input": "300274",
+  "count": 1,
+  "api_budget": {
+    "free_mode": true,
+    "request_count": 10,
+    "min_interval_seconds": 13,
+    "estimated_seconds": 117
+  }
+}
+```
+
+### POST /stock/backfill
+
+为已注册股票补历史 5min 数据。该接口使用 upsert 合并，不受 `insert_data` 只写入 `latest` 之后数据的限制。
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `stock` | string | 是 | — | 股票代码或名称 |
+| `days` | int | 否 | 200 | 向前补的交易日数量；系统会换算为更大的自然日请求窗口并按实际交易日截断 |
+| `start_date` | string | 否 | — | 指定历史开始日期 |
+| `end_date` | string | 否 | — | 指定历史结束日期 |
+| `queued` | bool | 否 | false | 为 true 时创建后台数据任务并立即返回 `job_id` |
+
+返回字段包含 `requested_trading_days`、`request_calendar_days`、`inserted_rows`、`updated_rows`、`rows_before`、`rows_after`、`source_first_timestamp`、`source_last_timestamp`、`source_trading_days` 和 `partial`。
+
+### GET /data-jobs/{job_id}
+
+查询后台数据任务状态。WebUI 在数据源 free mode 下用它轮询补历史任务。
+
+**响应** `200`
+```json
+{
+  "success": true,
+  "job": {
+    "id": "1f2e...",
+    "type": "backfill",
+    "status": "running",
+    "progress": 10,
+    "estimate": {
+      "api_budget": {
+        "request_count": 10,
+        "estimated_seconds": 117
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -324,25 +458,89 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 
 ## 行情图表
 
-### GET /stock/chart
+### GET /stock/chart-data
 
-返回 `image/png`。默认 `mode=integrated`：第一行日线 K 线 + 趋势四轨，以下依次 60/90/120min K 线 + MACD 副图。`mode=single` 仅渲染单一周期。
+返回 WebUI 绘图用 JSON。后端不再渲染 PNG；浏览器基于该接口用 TradingView Lightweight Charts 绘制 K 线、成交量、趋势通道、MACD、结构信号、序列信号和决策点。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | `stock` | string | 是 | — | 股票代码或名称，含中文请 URL-encode |
-| `mode` | string | 否 | `integrated` | `integrated` / `single` |
-| `interval` | string | 否 | `daily` | 仅 `mode=single` 生效：`daily`/`120min`/`90min`/`60min` |
-| `bars` | int | 否 | 90/120 | 各子图最近 N 根，夹到 `[20, 500]` |
+| `bars` | int | 否 | 180 | 最近 N 根，夹到 `[20, 500]` |
 
-**响应** `200` — `image/png`
+**响应** `200`
+```json
+{
+  "success": true,
+  "input": "000001",
+  "count": 1,
+  "results": [{
+    "display_code": "000001.SZ",
+    "daily": {
+      "candles": [{ "time": "2024-01-01T09:30:00", "open": 10, "high": 11, "low": 9, "close": 10.5 }],
+      "trend": [{ "time": "2024-01-01T09:30:00", "short_upper": 11, "short_lower": 9 }],
+      "macd": [{ "time": "2024-01-01T09:30:00", "dif": 0.1, "dea": 0.05, "hist": 0.1 }],
+      "sequence": [{ "time": "2024-01-01T09:30:00", "high9_signal": false }],
+      "decisions": [{ "time": "2024-01-01T09:30:00", "action": "BUY", "target_position": 10 }]
+    },
+    "intraday": {
+      "60min": {
+        "candles": [],
+        "macd": [],
+        "structure": []
+      }
+    }
+  }]
+}
+```
 
 **示例**
 ```bash
-# 默认整合图
-open "http://127.0.0.1:5555/api/stock/chart?stock=300274&bars=90"
-# 单一周期
-open "http://127.0.0.1:5555/api/stock/chart?stock=300274&mode=single&interval=90min"
+curl "http://127.0.0.1:5555/api/stock/chart-data?stock=300274&bars=120"
+```
+
+---
+
+## 回测
+
+### POST /stock/backtest
+
+对整合决策进行日频回测。撮合规则固定为 T 日收盘后生成信号，T+1 开盘成交；`final_target_position` 的 `0-10` 映射为 `0%-100%` 仓位。
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|------|------|------|------|------|
+| `stock` | string | 是 | — | 股票代码或名称 |
+| `start_date` | string | 否 | 全量 | `YYYY-MM-DD` |
+| `end_date` | string | 否 | 全量 | `YYYY-MM-DD` |
+| `initial_cash` | number | 否 | 100000 | 初始资金 |
+| `commission_rate` | number | 否 | 0.0003 | 单边手续费率 |
+| `slippage_bps` | number | 否 | 5 | 单边滑点 bps |
+| `min_bars` | int | 否 | 90 | 最少日线数量 |
+| `lot_size` | int | 否 | 1 | 下单数量向下取整的最小单位 |
+
+**响应** `200`
+```json
+{
+  "success": true,
+  "input": "000001",
+  "count": 1,
+  "results": [{
+    "display_code": "000001.SZ",
+    "metrics": {
+      "total_return": 0.12,
+      "annual_return": 0.18,
+      "max_drawdown": -0.08,
+      "sharpe": 1.2,
+      "trade_count": 8,
+      "benchmark_total_return": 0.09,
+      "excess_return": 0.03
+    },
+    "equity_curve": [],
+    "drawdown": [],
+    "positions": [],
+    "trades": [],
+    "signals": []
+  }]
+}
 ```
 
 ---

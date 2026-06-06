@@ -44,6 +44,16 @@ class TestWorkflowService:
         assert parts[0] == 'A'
         assert parts[-1] == '5min'
 
+    def test_register_free_mode_skips_initial_fetch(self, workflow_service, mock_deps):
+        mock_detect, mock_collect, mock_db = mock_deps
+        mock_detect.return_value = [('a', '000001')]
+        mock_db.get_latest_timestamp.return_value = None
+
+        result = workflow_service.register_stock('000001')
+
+        assert result['success'] is True
+        mock_collect.assert_not_called()
+
     def test_register_multi_market(self, workflow_service, mock_deps):
         mock_detect, mock_collect, mock_db = mock_deps
         mock_detect.return_value = [('hk', '09988'), ('us', 'BABA')]

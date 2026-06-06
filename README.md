@@ -30,7 +30,8 @@ StockQuantAssisant/
 │   │   ├── integrated_decision.py # 三层次日计划整合
 │   │   └── decision.py            # 决策引擎（三层整合）
 │   ├── schemas/
-│   │   └── decision.py            # DailyTradingPlan dataclass schema
+│   │   ├── decision.py            # DailyTradingPlan dataclass schema
+│   │   └── backtest.py            # Backtest dataclass schema
 │   ├── api/
 │   │   └── routes.py              # REST API 路由
 │   ├── templates/
@@ -43,17 +44,23 @@ StockQuantAssisant/
 │   ├── scheduler/
 │   │   └── job_scheduler.py       # APScheduler 任务调度
 │   └── services/
-│       ├── stock_service.py       # 股票识别、数据拉取（akshare / yfinance）
+│       ├── data_sources/          # 行情数据源接口与 iTick / akshare / yfinance 实现
+│       ├── stock_service.py       # 股票识别、采集调度与入库
 │       ├── workflow_service.py    # 工作流注册与管理
 │       ├── analysis_service.py    # 量化分析服务
-│       ├── chart_service.py       # K 线图表渲染（mplfinance）
+│       ├── chart_data_service.py  # WebUI 图表数据（K线/趋势/MACD/信号）
+│       ├── data_service.py        # 数据状态、主动刷新与历史补数据
+│       ├── data_job_service.py    # 后台数据任务队列
+│       ├── backtest_service.py    # 决策回测、撮合与绩效指标
 │       └── resample.py            # 多周期 OHLCV 重采样（5min → 60/90/120/daily）
-├── tests/                         # 单元测试（232 个）
+├── tests/                         # 单元测试（254 个）
 │   ├── conftest.py
 │   ├── test_algorithm.py
 │   ├── test_analysis_service.py
 │   ├── test_api.py
+│   ├── test_backtest_service.py
 │   ├── test_chart.py
+│   ├── test_data_service.py
 │   ├── test_database.py
 │   ├── test_integrated_decision.py
 │   ├── test_integration.py
@@ -113,13 +120,23 @@ python run.py start --host 0.0.0.0 --port 5000
 | `OSS_REGION` | 区域 | `us-east-1` |
 | `OSS_ACCESS_KEY_ID` | Access Key（不设使用 IAM 角色） | — |
 | `OSS_ACCESS_KEY_SECRET` | Secret Key | — |
+| `STOCKQUANT_DATA_SOURCE` | 主数据源，当前默认 iTick | `itick` |
+| `ITICK_TOKEN` / `ITICK_API_KEY` | iTick API token | — |
+| `ITICK_BASE_URL` | iTick 股票 REST 地址；免费体验可用 `https://api-free.itick.org/stock`，生产可设 `https://api.itick.org/stock` | `https://api-free.itick.org/stock` |
+| `ITICK_PAGE_LIMIT` | iTick 单页 K 线条数 | `1000` |
+| `ITICK_MAX_PAGES` | iTick 单次拉取最多分页数 | `30` |
+| `ITICK_RETRIES` | iTick HTTP 重试次数 | `3` |
+| `ITICK_FREE_MODE` | iTick 免费模式；注册不自动拉历史，刷新固定 1 次请求，补历史走限速队列 | `true` |
+| `ITICK_FREE_MIN_INTERVAL_SECONDS` | 免费模式下两次 iTick REST 请求的最小间隔 | `13` |
+| `ITICK_FREE_REFRESH_LIMIT` | 免费模式单次刷新请求的 K 线条数 | `1000` |
+| `STOCKQUANT_AUTO_COLLECT` | 是否启用后台定时采集；免费模式默认关闭 | `false` |
 
 > **stateless 部署**：设置 `OSS_BUCKET` 后，所有数据以 Parquet 格式直接存在 OSS 上，服务可随时启停，无需持久化本地磁盘。
 
 ### 运行测试
 
 ```bash
-pytest tests/ -v                    # 单元测试（232 个）
+pytest tests/ -v                    # 单元测试
 python3 e2e/test_parquet.py         # Parquet 本地 E2E
 python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 ```
@@ -130,8 +147,9 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 
 - 支持 A 股 / 港股 / 美股三市场，代码或名称输入
 - 名称自动匹配多市场（如"阿里巴巴"→ 港股 09988.HK + 美股 BABA.US）
-- 每个股票注册一个 5 分钟工作流定期增量采集，高周期通过运行时重采样生成
-- 初次注册拉取约 200 周期历史数据，之后定时增量更新
+- 每个股票注册一个 5 分钟工作流，高周期通过运行时重采样生成
+- iTick 免费模式默认开启：注册只登记工作流，不自动拉历史；后台定时采集关闭
+- 手动刷新只请求最新一页 5min 数据；补历史会显示预计 API 次数并走后台限速队列
 - 工作流持久化，服务重启自动恢复
 
 ### 量化决策引擎
@@ -152,8 +170,15 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 | `POST` | `/api/stock/code` | 录入股票名称 → 市场代码映射 |
 | `GET` | `/api/stock/codes` | 查看所有已录入映射 |
 | `POST` | `/api/stock/register` | 注册股票数据工作流 |
+| `GET` | `/api/stock/data-status` | 查看本地数据起止、行数和日线数量 |
+| `POST` | `/api/stock/refresh` | 主动刷新已注册股票的最新 5min 数据 |
+| `POST` | `/api/refresh` | 强制刷新所有已录入且已注册的股票 |
+| `GET` | `/api/stock/backfill-estimate` | 估算补历史需要的数据源 API 请求次数 |
+| `POST` | `/api/stock/backfill` | 为已注册股票补历史 5min 数据 |
+| `GET` | `/api/data-jobs/<id>` | 查询后台数据任务状态 |
 | `POST` | `/api/stock/decision` | 查询量化决策结果 |
-| `GET` | `/api/stock/chart` | 渲染 K 线图表（集成/单周期模式） |
+| `GET` | `/api/stock/chart-data` | 获取 WebUI 绘图数据 |
+| `POST` | `/api/stock/backtest` | 回测整合决策结果 |
 | `GET` | `/api/stock/<code>/workflows` | 查看指定股票工作流 |
 | `GET` | `/api/workflows` | 查看所有工作流 |
 | `DELETE` | `/api/workflows/<id>` | 删除工作流 |
@@ -167,7 +192,15 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 http://127.0.0.1:5000/
 ```
 
-页面直接调用现有 API，支持输入标的分析、注册工作流、查看次日交易计划、集成图表和原始 JSON。
+页面直接调用现有 API，支持输入标的分析、注册工作流、查看次日交易计划、TradingView 风格行情图、回测收益曲线、交易明细和原始 JSON。
+
+## 回测系统
+
+- 信号源：`evaluate_integrated_dataframe`，逐日使用截至 T 日的数据生成决策。
+- 撮合语义：T 日收盘后生成计划，T+1 开盘价成交。
+- 仓位映射：策略 `0-10` 仓位映射为 `0%-100%` 资金暴露。
+- 成本模型：支持手续费率、滑点 bps、初始资金和最小日线数量。
+- 输出：收益曲线、回撤、仓位、交易明细、信号点、买入持有基准和绩效指标。
 
 ## 工作流机制
 
@@ -175,7 +208,14 @@ http://127.0.0.1:5000/
 - **市场代码**：`A`（A 股）、`HK`（港股）、`US`（美股）
 - **采集周期**：`5min`（唯一采集粒度，高周期在运行时通过重采样生成：60min / 90min / 120min / daily）
 
-注册新股票时，工作流会拉取约 200 个完整周期的 5 分钟历史数据写入 Parquet，之后每个 5 分钟定时增量更新，仅在交易时段执行。高周期（60min / 90min / 120min / daily）数据在量化分析时通过重采样动态生成。
+注册新股票时，系统只创建并持久化 5min 工作流；在 iTick 免费模式下不会隐式拉取历史数据，用户通过“刷新数据”或“补历史数据”显式消耗 API。关闭 free mode 且启用 `STOCKQUANT_AUTO_COLLECT` 后，调度器才会在交易时段按 5min 工作流自动采集。高周期（60min / 90min / 120min / daily）数据在量化分析时通过重采样动态生成。
+
+已注册股票支持两类手动数据维护：
+
+- **刷新最新数据**：`POST /api/stock/refresh`，拉取最近小窗口并只写入最新增量；`POST /api/refresh` 可批量刷新所有已录入且已注册的股票。
+- **补历史数据**：`POST /api/stock/backfill`，`days` 表示向前补的交易日数量；系统会换算为更大的自然日请求窗口，再按实际交易日截断并按 timestamp upsert 合并。
+
+注意：iTick 会返回每个市场常规交易时段内的 5min K 线；A 股可能包含开盘集合/开盘 K，系统会保留常规时段数据并由重采样层处理尾部 partial bar。未配置 iTick token 或 iTick 请求失败时，系统会回退到 akshare / yfinance，其中 yfinance 5m 常限制最近 60 天。
 
 ## 数据存储
 
@@ -189,8 +229,9 @@ http://127.0.0.1:5000/
 
 ## 数据源
 
-- A 股：[akshare](https://github.com/akfamily/akshare)（不可用时自动回退 yfinance）
-- 港股 / 美股：[yfinance](https://github.com/ranaroussi/yfinance)
+- 主数据源：[iTick](https://docs.itick.org/zh-cn/rest-api/stocks/stock-kline)，覆盖 A 股 / 港股 / 美股 5min K 线。
+- 数据源统一实现 `MarketDataSource.fetch_5m(FetchRequest)`，业务层只消费标准 OHLCV DataFrame。
+- 兼容兜底：未配置 iTick token 或 iTick 请求失败时，A 股 / 港股仍可回退 akshare，美股回退 yfinance。
 
 ## 技术栈
 
@@ -201,8 +242,7 @@ http://127.0.0.1:5000/
 | 存储格式 | Parquet |
 | 对象存储 | S3 / 阿里云 OSS (兼容 S3 API) |
 | 数据处理 | Pandas / NumPy |
-| 图表渲染 | matplotlib / mplfinance |
+| 图表渲染 | TradingView Lightweight Charts（行情图 + 回测图）+ Canvas fallback |
 | 任务调度 | APScheduler |
-| A 股数据 | akshare |
-| 港股/美股数据 | yfinance |
+| 行情数据 | iTick 优先，akshare / yfinance 兜底 |
 | 测试 | pytest |

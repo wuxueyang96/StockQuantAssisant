@@ -23,7 +23,7 @@ StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化
 ┌────▼────────────────────▼──────────┐
 │           Service 层                │
 │  workflow_service / stock_service   │
-│  analysis_service / chart_service   │
+│ analysis / chart_data / backtest svc│
 │  resample                          │
 └────┬───────────────┬───────────────┘
      │               │
@@ -49,7 +49,10 @@ StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化
 | `INTERVAL_MAP` | 采集层周期 → (period, interval) 映射；**仅包含 `5min`** |
 | `INTERVAL_MINUTES` | 周期 → 分钟数（供 resample 和 scheduler 使用） |
 | `RESAMPLE_INTERVALS` | 运行时合成支持的目标周期（供文档/调度引用） |
-| `YFINANCE_TICKER_MAP` | 市场 → yfinance ticker 转换函数 |
+| `DATA_SOURCE` / `ITICK_TOKEN` / `ITICK_BASE_URL` | 主数据源选择与 iTick 配置；token 通过环境变量注入 |
+| `ITICK_FREE_MODE` / `ITICK_FREE_MIN_INTERVAL_SECONDS` | iTick 免费模式和全局 REST 限速配置 |
+| `STOCKQUANT_AUTO_COLLECT` | 是否启用后台定时采集；免费模式默认关闭 |
+| `YFINANCE_TICKER_MAP` | 市场 → yfinance ticker 转换函数（兜底用） |
 | `TRADING_HOURS` | 各市场交易时段和时区 |
 | OSS 配置 | `OSS_BUCKET` / `OSS_ENDPOINT` / `OSS_REGION` / `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` |
 
@@ -62,8 +65,15 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 | `/stock/code` | POST | 录入/更新股票名称→代码映射 |
 | `/stock/codes` | GET | 查看所有映射 |
 | `/stock/register` | POST | 注册股票数据工作流 |
+| `/stock/data-status` | GET | 查询本地数据状态 |
+| `/stock/refresh` | POST | 主动刷新最新数据 |
+| `/refresh` | POST | 强制刷新所有已录入且已注册股票 |
+| `/stock/backfill-estimate` | GET | 估算补历史 API 请求次数 |
+| `/stock/backfill` | POST | 补历史 5min 数据 |
+| `/data-jobs/<id>` | GET | 查询后台数据任务状态 |
 | `/stock/decision` | POST | 查询量化决策结果 |
-| `/stock/chart` | GET | 返回行情图表 PNG |
+| `/stock/chart-data` | GET | 返回 WebUI 绘图 JSON |
+| `/stock/backtest` | POST | 回测整合决策 |
 | `/stock/<code>/workflows` | GET | 查询指定股票工作流 |
 | `/workflows` | GET | 查看所有工作流 |
 | `/workflows/<id>` | DELETE | 删除工作流 |
@@ -73,7 +83,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 - `app/templates/index.html`：单页控制台入口，访问 `/`。
 - `app/static/css/app.css`：页面布局与视觉样式。
-- `app/static/js/app.js`：直接调用现有 API，支持标的分析、注册工作流、查看三层次日计划、集成图表和原始 JSON。
+- `app/static/js/app.js`：直接调用现有 API，支持标的分析、注册工作流、查看三层次日计划、TradingView Lightweight Charts 行情图、回测和原始 JSON。
 - 前端不引入 Node/Vite/Webpack 等构建链，部署方式与原 Flask 服务一致。
 
 ### 3.3 Service 层
@@ -82,11 +92,28 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 - `detect_market(input)` — 代码格式识别或名称反查 → `[(market, code), ...]`
 - `resolve_stock_name(name)` — 从 `stock_codes` 表反查名称
-- `fetch_stock_data(market, code, interval)` — 统一拉取 5min K 线（A/港股优先 akshare 回退 yfinance；美股 yfinance 5m）
+- `fetch_stock_data(market, code, interval)` — 构造 `FetchRequest` 并交给数据源注册表拉取 5min K 线
 - `collect_and_store(market, code, interval)` — 拉取 + 去重写入 Parquet；仅交易时段执行
 - `is_trading_time(market)` — 交易时段判断
 
-**数据源策略**：只采集 5min 一种粒度。60min / 90min / 120min / daily 由 `resample` 运行时合成，避免 Yahoo 不支持 120m、港股小时线为空、A 股小时线时区错配等问题。
+#### data_sources/
+
+行情数据源被抽象为统一接口：
+
+- `FetchRequest`：市场、代码、周期、历史窗口、分页上限等请求参数。
+- `MarketDataSource.fetch_5m(request)`：返回标准 OHLCV DataFrame。
+- `MarketDataSource.estimate_api_usage(...)`：返回统一 API 预算结构。
+- `registry.fetch_5m`：按 `STOCKQUANT_DATA_SOURCE` 选择主源并执行 fallback。
+
+当前实现：
+
+| 数据源 | 文件 | 覆盖市场 | 说明 |
+|--------|------|----------|------|
+| iTick | `itick.py` | A / HK / US | 主数据源；支持分页、free mode 限速和请求预算 |
+| akshare | `akshare_source.py` | A / HK | A 股 / 港股兜底 |
+| yfinance | `yfinance_source.py` | A / HK / US | 最后兜底；5min 历史窗口受 Yahoo 限制 |
+
+**数据源策略**：业务层只依赖 `MarketDataSource` 接口，所有源都输出标准 5min OHLCV。60min / 90min / 120min / daily 由 `resample` 运行时合成。未配置 iTick token 或 iTick 请求失败时，注册表会按市场自动回退 akshare / yfinance。
 
 #### workflow_service.py
 
@@ -105,15 +132,28 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 3. `_enrich_resonance_integrated`：使用已经通过交易确认过滤的计划结果输出 60/90/120 共振
 4. 返回 `interval: integrated`
 
+#### data_service.py
+
+- `get_data_status` — 返回本地 5min 数据行数、起止时间、日线数量和注册状态。
+- `refresh_data` — 面向已注册股票，拉取最近小窗口并通过 `insert_data` 增量写入。
+- `refresh_all_registered` — 强制刷新所有已录入代码映射且已注册 5min 工作流的股票。
+- `backfill_data` — 面向已注册股票，拉取指定历史窗口并通过 `upsert_data` 合并补齐旧数据。
+
 #### resample.py
 
 `resample_ohlcv(df_5m, target_interval)`：按交易日分组、按 K 线序号切桶。聚合：`Open=first, High=max, Low=min, Close=last, Volume=sum`。桶内不足时输出尾巴 K 线并标记 `partial_bar`。默认交易确认会过滤 90min 的 partial 尾巴。
 
-#### chart_service.py
+#### chart_data_service.py
 
-- `render_chart_png` — 单周期 K 线 + 趋势四轨
-- `render_intraday_macd_png` — K 线 + MACD 副图（60/90/120 结构可视化）
-- `render_integrated_dashboard_png` — 纵向拼接日线趋势 + 三周期 MACD
+- `build_chart_data` — 输出浏览器绘图用 JSON。
+- 日线：K 线、趋势四轨、MACD、九转序列、逐日决策点。
+- 60/90/120min：K 线、MACD、结构 75/100 信号和 active 状态。
+
+#### backtest_service.py
+
+- `run_backtest` — 解析标的并对每个市场回测。
+- `simulate_backtest` — T 日信号、T+1 Open 撮合。
+- 输出收益曲线、回撤、仓位、交易明细、买入持有基准和绩效指标。
 
 ### 3.4 Algos 层 — 量化算法
 
@@ -127,7 +167,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 `TrendChannel(short_period=26, long_period=90, offset_pct=0.03)`
 
-通道公式：`EMA(RollingMax(High, N), N) × (1+offset)` / `EMA(RollingMin(Low, N), N) × (1−offset)`
+通道公式：`EMA(RollingMax(Close, N), N) × (1+offset)` / `EMA(RollingMin(Low, N), N) × (1−offset)`。默认上轨使用 Close，`channel_upper_source='high'` 时可切回 High。
 
 趋势状态：`UP_STRONG` / `UP_PULLBACK` / `RANGE` / `DOWN_REBOUND` / `DOWN_STRONG` / `UNKNOWN`。趋势层输出 `base_target_position`、`position_cap`、`position_floor`、`trend_reason` 和质量指标。突破判定使用 T 日收盘价对比 T-1 已确定轨线，避免未来函数。
 
@@ -231,11 +271,15 @@ s3://{bucket}/
 ```
 POST /api/stock/register {"stock": "阿里巴巴"}
   ├─ detect_market("阿里巴巴") → resolve_stock_name → [('hk','09988'), ('us','BABA')]
-  ├─ _register_one_market('hk', '09988')
-  │   ├─ collect_and_store(interval='5min') → akshare → Parquet
-  │   └─ save_workflow → metadata/workflows.parquet
-  ├─ _register_one_market('us', 'BABA') → yfinance 5m → Parquet
-  └─ 返回 2 个工作流 ID
+  ├─ _register_one_market('hk', '09988') → create 5min table → save_workflow
+  ├─ _register_one_market('us', 'BABA') → create 5min table → save_workflow
+  └─ 返回 2 个工作流 ID；free mode 下不隐式拉历史
+
+POST /api/stock/backfill {"stock": "阿里巴巴", "days": 200, "queued": true}
+  ├─ enqueue data job
+  ├─ data_sources.registry → iTick / akshare / yfinance → standard 5min OHLCV
+  ├─ upsert_data by timestamp
+  └─ /api/data-jobs/<id> 轮询进度
 
 POST /api/stock/decision {"stock": "阿里巴巴", "interval": "daily"}
   ├─ detect_market → [('hk','09988'), ('us','BABA')]
@@ -249,12 +293,12 @@ POST /api/stock/decision {"stock": "阿里巴巴", "interval": "daily"}
 | 决策 | 理由 |
 |------|------|
 | DuckDB + Parquet on OSS (存算分离) | Parquet 列存直存 OSS，httpfs 远程查询，零本地盘 |
-| akshare + yfinance 双数据源 | akshare 对 A 股支持好（前复权），yfinance 覆盖港股美股 |
+| 数据源接口 + iTick/akshare/yfinance 实现 | 业务层稳定依赖 `MarketDataSource`；后续换源只新增实现和注册表策略 |
 | 仅采集 5min，高粒度运行时合成 | 规避 Yahoo 不支持 120m、港股小时线为空、A 股时区错配 |
 | DIF 带符号相对阈值比较 | 统一顶/底背离判定，解决负 DIF 和 |DIF|<1 的语义反转 |
 | 结构状态机 100% 后立即 reset | 避免单股生命周期只产一次信号 |
 | 钝化区间 DIF 极值逐根更新 | 修复 DIF 在两峰之间漏检 |
-| 趋势通道 EMA(RollingMax(High,N), N) | 与多空通道原意一致；直接 EMA(High) 退化为普通均线 |
+| 趋势通道默认 EMA(RollingMax(Close,N), N) | 避免单根极端影线虚胖上轨；可通过 `channel_upper_source='high'` 切回 High |
 | 趋势定仓、结构修边、序列纪律 | 避免结构/序列反客为主；真实 `weight` 只来自仓位差，`signal_strength` 仅展示 |
 | cap/floor 边界内修边 | 结构不能反转趋势方向，避免仓位 4/6 附近的多空逻辑冲突 |
 | 信号 T+1 计划执行 | 趋势用 T 日收盘判定，下一工作日执行，避免未来函数 |
@@ -283,7 +327,8 @@ StockQuantAssisant/
 │   │   ├── integrated_decision.py
 │   │   └── decision.py
 │   ├── schemas/
-│   │   └── decision.py
+│   │   ├── decision.py
+│   │   └── backtest.py
 │   ├── api/
 │   │   └── routes.py
 │   ├── templates/
@@ -296,17 +341,23 @@ StockQuantAssisant/
 │   ├── scheduler/
 │   │   └── job_scheduler.py
 │   └── services/
+│       ├── data_sources/
 │       ├── stock_service.py
 │       ├── workflow_service.py
 │       ├── analysis_service.py
-│       ├── chart_service.py
+│       ├── chart_data_service.py
+│       ├── data_service.py
+│       ├── data_job_service.py
+│       ├── backtest_service.py
 │       └── resample.py
 ├── tests/
 │   ├── conftest.py
 │   ├── test_algorithm.py
 │   ├── test_analysis_service.py
 │   ├── test_api.py
+│   ├── test_backtest_service.py
 │   ├── test_chart.py
+│   ├── test_data_service.py
 │   ├── test_database.py
 │   ├── test_integrated_decision.py
 │   ├── test_integration.py
@@ -325,7 +376,7 @@ StockQuantAssisant/
 
 ## 7. 测试
 
-基于 pytest，共 232 个测试函数覆盖：股票识别、Parquet CRUD、工作流管理、API 端点、前端首页、三个量化算法、三层决策引擎、多周期合成、90min partial-bar 过滤和集成流程。
+基于 pytest，共 254 个测试函数覆盖：股票识别、数据源接口、Parquet CRUD、工作流管理、API 端点、前端首页、WebUI 图表数据、回测、三个量化算法、三层决策引擎、多周期合成、90min partial-bar 过滤和集成流程。
 
 ```bash
 pytest tests/ -v                        # 单元测试

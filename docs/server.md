@@ -9,7 +9,14 @@ StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台
 - `GET /`：返回内置前端控制台。
 - `POST /api/stock/decision`：输入股票代码或名称，返回最新三层次日交易计划。
 - `POST /api/stock/register`：注册数据同步工作流。
-- `GET /api/stock/chart`：返回集成或单周期 PNG 行情图。
+- `GET /api/stock/chart-data`：返回 WebUI 绘图用 JSON。
+- `POST /api/stock/backtest`：回测整合决策，输出收益曲线、回撤、仓位和交易明细。
+- `GET /api/stock/data-status`：查看本地 5min 数据状态。
+- `POST /api/stock/refresh`：主动刷新已注册股票的最新数据。
+- `POST /api/refresh`：强制刷新所有已录入且已注册的股票。
+- `GET /api/stock/backfill-estimate`：估算补历史需要的数据源 API 请求次数。
+- `POST /api/stock/backfill`：为已注册股票补历史数据。
+- `GET /api/data-jobs/<id>`：查询后台数据任务状态。
 - `POST /api/stock/code` / `GET /api/stock/codes`：维护股票名称与市场代码映射。
 - `GET /api/health`：健康检查。
 
@@ -70,10 +77,11 @@ s3://{bucket}/
 1. 解析输入市场和代码。
 2. 为每个市场检查唯一 5min 工作流。
 3. 若对应 Parquet 文件不存在，则创建表。
-4. 若表为空，则立即拉取初始 5min 历史数据。
-5. 保存工作流元数据，并由调度器按 5 分钟间隔增量采集。
+4. 保存工作流元数据。
+5. 当前主数据源为 iTick 且 `ITICK_FREE_MODE=true` 时不自动拉历史，用户通过“刷新数据”或“补历史数据”显式消耗 API。
+6. 关闭 free mode 且启用 `STOCKQUANT_AUTO_COLLECT` 后，调度器才按工作流周期自动采集。
 
-若工作流已存在但数据表为空，系统会尝试补拉初始数据。
+若工作流已存在但数据表为空，free mode 下仍只保留注册状态，不隐式请求外部数据源。
 
 ---
 
@@ -147,7 +155,7 @@ weight = order_weight = clamp(abs(order_delta) / 10, 0, 1)
 - Python + Flask
 - DuckDB + Parquet on OSS
 - APScheduler 任务调度
-- akshare + yfinance 数据源
+- 统一数据源接口，iTick 主数据源，akshare + yfinance 兼容兜底
 - pandas / NumPy 数据处理
-- matplotlib / mplfinance 图表渲染
+- TradingView Lightweight Charts 行情图 + 回测图，Canvas fallback
 - 无构建链前端：Flask template + static CSS/JS

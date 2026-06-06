@@ -33,6 +33,9 @@ class WorkflowService:
         for interval in self._COLLECT_INTERVALS:
             table_name = get_table_name(market, stock_code, interval)
             if not db_manager.table_exists(market, table_name) or db_manager.get_latest_timestamp(market, table_name) is None:
+                if Config.ITICK_FREE_MODE:
+                    logger.info(f"free mode: 跳过 {table_name} 的自动初始拉取")
+                    continue
                 logger.info(f"表 {table_name} 为空，立即拉取初始数据...")
                 try:
                     rows = collect_and_store(market, stock_code, interval, skip_trading_check=True)
@@ -51,11 +54,14 @@ class WorkflowService:
                 db_manager.create_stock_table(market, table_name)
 
             if db_manager.get_latest_timestamp(market, table_name) is None:
-                logger.info(f"表 {table_name} 为空，立即拉取初始数据...")
-                try:
-                    collect_and_store(market, stock_code, interval, skip_trading_check=True)
-                except Exception as e:
-                    logger.warning(f"数据拉取失败 ({wf_id}): {e}，工作流已注册但暂无数据")
+                if Config.ITICK_FREE_MODE:
+                    logger.info(f"free mode: 工作流 {wf_id} 已注册，跳过自动初始拉取")
+                else:
+                    logger.info(f"表 {table_name} 为空，立即拉取初始数据...")
+                    try:
+                        collect_and_store(market, stock_code, interval, skip_trading_check=True)
+                    except Exception as e:
+                        logger.warning(f"数据拉取失败 ({wf_id}): {e}，工作流已注册但暂无数据")
 
             wf_data = {
                 'market': market,

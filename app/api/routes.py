@@ -1,16 +1,21 @@
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify
 import pandas as pd
 from app.services.workflow_service import workflow_service
 from app.scheduler.job_scheduler import job_scheduler
 from app.models.database import db_manager
 from app.services.analysis_service import analyze_stock
-from app.services.stock_service import detect_market, get_table_name, format_stock_code
-from app.services.resample import resample_ohlcv
-from app.services.chart_service import render_chart_png, render_integrated_dashboard_png
-from app.algos.decision import DecisionEngine
+from app.services.backtest_service import run_backtest
+from app.services.chart_data_service import build_chart_data
+from app.services.data_job_service import data_job_service
+from app.services.data_service import (
+    backfill_data,
+    estimate_backfill_api_usage,
+    get_data_status,
+    refresh_all_registered,
+    refresh_data,
+)
 
 api_bp = Blueprint('api', __name__)
-_chart_engine = DecisionEngine()
 
 
 @api_bp.route('/stock/register', methods=['POST'])
@@ -104,6 +109,108 @@ def stock_decision():
         return jsonify({'success': False, 'message': f'服务器错误: {str(e)}'}), 500
 
 
+@api_bp.route('/stock/data-status', methods=['GET'])
+def stock_data_status():
+    stock = (request.args.get('stock') or '').strip()
+    if not stock:
+        return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
+    try:
+        return jsonify(get_data_status(stock))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'数据状态查询失败: {str(e)}'}), 500
+
+
+@api_bp.route('/stock/refresh', methods=['POST'])
+def stock_refresh():
+    data = request.get_json() or {}
+    stock = (data.get('stock') or '').strip()
+    if not stock:
+        return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
+    try:
+        history_days = data.get('history_days')
+        history_days = int(history_days) if history_days not in (None, '') else None
+        return jsonify(refresh_data(stock, history_days=history_days))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'刷新失败: {str(e)}'}), 500
+
+
+@api_bp.route('/refresh', methods=['POST'])
+def refresh_registered_stocks():
+    """Force refresh all stocks in the code registry."""
+    data = request.get_json() or {}
+    try:
+        history_days = data.get('history_days')
+        history_days = int(history_days) if history_days not in (None, '') else None
+        return jsonify(refresh_all_registered(history_days=history_days))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'刷新失败: {str(e)}'}), 500
+
+
+@api_bp.route('/stock/backfill', methods=['POST'])
+def stock_backfill():
+    data = request.get_json() or {}
+    stock = (data.get('stock') or '').strip()
+    if not stock:
+        return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
+    try:
+        days = data.get('days')
+        days = int(days) if days not in (None, '') else None
+        if data.get('queued') or data.get('async'):
+            job = data_job_service.enqueue_backfill(
+                stock,
+                days=days,
+                start_date=data.get('start_date'),
+                end_date=data.get('end_date'),
+            )
+            return jsonify({
+                'success': True,
+                'queued': True,
+                'job_id': job['id'],
+                'job': job,
+                'estimate': job.get('estimate'),
+            })
+        payload = backfill_data(
+            stock,
+            days=days,
+            start_date=data.get('start_date'),
+            end_date=data.get('end_date'),
+        )
+        return jsonify(payload)
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'补历史失败: {str(e)}'}), 500
+
+
+@api_bp.route('/stock/backfill-estimate', methods=['GET'])
+def stock_backfill_estimate():
+    stock = (request.args.get('stock') or '').strip()
+    if not stock:
+        return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
+    try:
+        days = request.args.get('days')
+        days = int(days) if days not in (None, '') else None
+        return jsonify(estimate_backfill_api_usage(stock, days=days))
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'估算失败: {str(e)}'}), 500
+
+
+@api_bp.route('/data-jobs/<job_id>', methods=['GET'])
+def get_data_job(job_id):
+    job = data_job_service.get_job(job_id)
+    if not job:
+        return jsonify({'success': False, 'message': '任务不存在'}), 404
+    return jsonify({'success': True, 'job': job})
+
+
 @api_bp.route('/stock/<stock_code>/workflows', methods=['GET'])
 def get_stock_workflows(stock_code):
     workflows = workflow_service.get_stock_workflows(stock_code)
@@ -135,125 +242,66 @@ def delete_workflow(workflow_id):
         return jsonify({'success': False, 'message': f'工作流 {workflow_id} 不存在'}), 404
 
 
-@api_bp.route('/stock/chart', methods=['GET'])
-def stock_chart():
-    """渲染行情图，直接返回 image/png。
+def _parse_bars(default: int = 180) -> int:
+    try:
+        bars = int(request.args.get('bars', str(default)))
+    except ValueError:
+        raise ValueError('bars 必须是整数')
+    return max(20, min(bars, 500))
 
-    Query 参数：
-        stock    str  必填，股票代码 / 名称（与 /stock/decision 一致）
-        mode     str  默认 `integrated`：日线 K+趋势四轨，下接 60/90/120 的 K+MACD；
-                 `single` 时仅画 `interval` 指定的一根周期（旧行为）。
-        interval str  仅 `mode=single` 时使用；默认 daily；可选 daily/120min/90min/60min
-        bars     int  默认 integrated=90 / single=120，最近 N 根 K 线
-    """
+
+@api_bp.route('/stock/chart-data', methods=['GET'])
+def stock_chart_data():
+    """返回浏览器绘图用 JSON，不再由后端渲染 PNG。"""
     stock = (request.args.get('stock') or '').strip()
     if not stock:
         return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
 
-    mode = (request.args.get('mode') or 'integrated').lower()
-    if mode not in ('integrated', 'single'):
-        return jsonify({'success': False, 'message': 'mode 必须是 integrated 或 single'}), 400
-
-    interval = request.args.get('interval', 'daily')
-    if interval not in ('daily', '120min', '90min', '60min'):
-        return jsonify({
-            'success': False,
-            'message': 'interval 必须是 daily/120min/90min/60min'
-        }), 400
-
     try:
-        default_bars = 90 if mode == 'integrated' else 120
-        bars = int(request.args.get('bars', str(default_bars)))
-        bars = max(20, min(bars, 500))
+        bars = _parse_bars(default=180)
     except ValueError:
         return jsonify({'success': False, 'message': 'bars 必须是整数'}), 400
 
     try:
-        detections = detect_market(stock)
+        payload = build_chart_data(stock, bars=bars)
+        return jsonify(payload)
     except ValueError as e:
         return jsonify({'success': False, 'message': str(e)}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'图表数据生成失败: {e}'}), 500
 
-    market, code = detections[0]
-    table = get_table_name(market, code, '5min')
-    raw = db_manager.get_data(market, table, limit=20000)
-    if raw is None or raw.empty:
-        return jsonify({
-            'success': False,
-            'message': f'数据表 {table} 不存在或为空，请先注册该股票工作流'
-        }), 404
 
-    if 'timestamp' in raw.columns:
-        raw = raw.set_index('timestamp')
-    raw = raw.sort_index()
-    raw = raw.rename(columns={c: c.capitalize() for c in raw.columns})
+@api_bp.route('/stock/chart', methods=['GET'])
+def stock_chart_legacy():
+    """Deprecated compatibility alias for /stock/chart-data."""
+    return stock_chart_data()
 
-    _POS_ASCII = {'满仓': 'full', '重仓': 'heavy', '轻仓': 'light',
-                  '空仓': 'empty', '冷启动': 'cold'}
-    display = format_stock_code(market, code)
+
+@api_bp.route('/stock/backtest', methods=['POST'])
+def stock_backtest():
+    data = request.get_json() or {}
+    stock = (data.get('stock') or '').strip()
+    if not stock:
+        return jsonify({'success': False, 'message': '缺少 stock 参数'}), 400
+
+    allowed = {
+        'start_date', 'end_date', 'initial_cash', 'commission_rate',
+        'slippage_bps', 'min_bars', 'lot_size', 'benchmark',
+    }
+    kwargs = {k: data[k] for k in allowed if k in data}
 
     try:
-        if mode == 'integrated':
-            df_daily = resample_ohlcv(raw, 'daily')
-            if df_daily is None or len(df_daily) < 30:
-                return jsonify({
-                    'success': False,
-                    'message': '5min 数据不足以合成日线（需要至少 30 根日线）'
-                }), 404
-            intraday = {}
-            for itv in ('60min', '90min', '120min'):
-                dfi = resample_ohlcv(raw, itv)
-                if dfi is not None and len(dfi) >= 30:
-                    intraday[itv] = dfi
-            try:
-                summary = _chart_engine.summary_integrated(df_daily, intraday)
-                close = summary.get('close')
-                pos_label = _POS_ASCII.get(
-                    summary.get('position', {}).get('label'),
-                    summary.get('position', {}).get('label'),
-                )
-                action = summary.get('action')
-            except Exception:
-                close = pos_label = action = None
-            title_daily = '  '.join(
-                [x for x in [
-                    f'{display} | daily+trend',
-                    f'close={close}' if close is not None else None,
-                    f'pos={pos_label}' if pos_label else None,
-                    f'action={action}' if action else None,
-                ] if x]
-            )
-            intraday_titles = {k: f'{display} | {k} + MACD' for k in intraday}
-            png = render_integrated_dashboard_png(
-                df_daily, intraday, title_daily, intraday_titles=intraday_titles, bars=bars,
-            )
-        else:
-            df = resample_ohlcv(raw, interval)
-            if df is None or len(df) < 30:
-                return jsonify({
-                    'success': False,
-                    'message': f'5min 数据不足以合成 {interval}（需要至少 30 根目标周期）'
-                }), 404
-            try:
-                summary = _chart_engine.summary(df)
-                close = summary.get('close')
-                pos_label = summary.get('position', {}).get('label')
-                pos_label = _POS_ASCII.get(pos_label, pos_label)
-                action = summary.get('action')
-            except Exception:
-                close = pos_label = action = None
-            title_bits = [f'{display} | {interval}']
-            if close is not None:
-                title_bits.append(f'close={close}')
-            if pos_label:
-                title_bits.append(f'pos={pos_label}')
-            if action:
-                title_bits.append(f'action={action}')
-            title = '  '.join(title_bits)
-            png = render_chart_png(df=df, title=title, bars=bars)
+        kwargs['initial_cash'] = float(kwargs.get('initial_cash', 100000.0))
+        kwargs['commission_rate'] = float(kwargs.get('commission_rate', 0.0003))
+        kwargs['slippage_bps'] = float(kwargs.get('slippage_bps', 5.0))
+        kwargs['min_bars'] = int(kwargs.get('min_bars', 90))
+        kwargs['lot_size'] = int(kwargs.get('lot_size', 1))
+        payload = run_backtest(stock, **kwargs)
+        return jsonify(payload)
+    except ValueError as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
     except Exception as e:
-        return jsonify({'success': False, 'message': f'图表渲染失败: {e}'}), 500
-
-    return Response(png, mimetype='image/png')
+        return jsonify({'success': False, 'message': f'回测失败: {str(e)}'}), 500
 
 
 @api_bp.route('/health', methods=['GET'])

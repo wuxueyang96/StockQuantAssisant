@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+import uuid
 from typing import Optional, Tuple
 
 import duckdb
@@ -13,12 +15,14 @@ class DatabaseManager:
     def __init__(self):
         self._conn = None
         self._metadata_loaded = False
+        self._io_lock = threading.RLock()
 
     def _get_conn(self) -> duckdb.DuckDBPyConnection:
-        if self._conn is None:
-            self._conn = duckdb.connect(':memory:')
-            self._setup_httpfs()
-        return self._conn
+        with self._io_lock:
+            if self._conn is None:
+                self._conn = duckdb.connect(':memory:')
+                self._setup_httpfs()
+            return self._conn
 
     def _setup_httpfs(self):
         try:
@@ -52,20 +56,33 @@ class DatabaseManager:
         return os.path.join(Config.DATA_DIR, 'metadata', f"{table_name}.parquet")
 
     def _try_read_parquet(self, url: str) -> pd.DataFrame:
-        try:
-            return self._get_conn().execute(
-                f"SELECT * FROM read_parquet('{url}')"
-            ).fetchdf()
-        except Exception:
-            return pd.DataFrame()
+        with self._io_lock:
+            try:
+                return self._get_conn().execute(
+                    f"SELECT * FROM read_parquet('{url}')"
+                ).fetchdf()
+            except Exception:
+                return pd.DataFrame()
 
     def _write_parquet(self, df: pd.DataFrame, url: str):
-        conn = self._get_conn()
-        conn.register('__df', df)
-        conn.execute(
-            f"COPY __df TO '{url}' (FORMAT PARQUET, OVERWRITE_OR_IGNORE true)"
-        )
-        conn.unregister('__df')
+        with self._io_lock:
+            conn = self._get_conn()
+            target_url = url
+            temp_url = None
+            if not url.startswith('s3://'):
+                temp_url = f"{url}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+                target_url = temp_url
+            conn.register('__df', df)
+            try:
+                conn.execute(
+                    f"COPY __df TO '{target_url}' (FORMAT PARQUET, OVERWRITE_OR_IGNORE true)"
+                )
+                if temp_url:
+                    os.replace(temp_url, url)
+            finally:
+                conn.unregister('__df')
+                if temp_url and os.path.exists(temp_url):
+                    os.remove(temp_url)
 
     def quote(self, name: str) -> str:
         return f'"{name}"'
@@ -165,42 +182,34 @@ class DatabaseManager:
 
     def table_exists(self, market: str, table_name: str) -> bool:
         url = self._data_url(market, table_name)
-        try:
-            result = self._get_conn().execute(
-                f"SELECT COUNT(*) FROM read_parquet('{url}')"
-            ).fetchone()
-            return result is not None and result[0] > 0
-        except Exception:
-            return False
+        with self._io_lock:
+            try:
+                result = self._get_conn().execute(
+                    f"SELECT COUNT(*) FROM read_parquet('{url}')"
+                ).fetchone()
+                return result is not None and result[0] > 0
+            except Exception:
+                return False
 
     def create_stock_table(self, market: str, table_name: str):
         pass
 
     def get_latest_timestamp(self, market: str, table_name: str):
         url = self._data_url(market, table_name)
-        try:
-            result = self._get_conn().execute(
-                f"SELECT MAX(timestamp) FROM read_parquet('{url}')"
-            ).fetchone()
-            return result[0] if result and result[0] else None
-        except Exception:
-            return None
+        with self._io_lock:
+            try:
+                result = self._get_conn().execute(
+                    f"SELECT MAX(timestamp) FROM read_parquet('{url}')"
+                ).fetchone()
+                return result[0] if result and result[0] else None
+            except Exception:
+                return None
 
     def insert_data(self, market: str, table_name: str, df: pd.DataFrame) -> int:
         if df.empty:
             return 0
 
-        df = df.copy()
-        df.columns = [c.lower() for c in df.columns]
-
-        if 'timestamp' not in df.columns:
-            df.index.name = 'timestamp'
-            df = df.reset_index()
-
-        cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume',
-                'dividends', 'stock_splits']
-        existing = [c for c in cols if c in df.columns]
-        df = df[existing]
+        df = self._normalize_ohlcv_for_write(df)
 
         url = self._data_url(market, table_name)
         prev = self._try_read_parquet(url)
@@ -220,15 +229,106 @@ class DatabaseManager:
         self._write_parquet(merged, url)
         return len(df)
 
+    def _normalize_ohlcv_for_write(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df.columns = [c.lower().replace(' ', '_') for c in df.columns]
+
+        if 'timestamp' not in df.columns:
+            df.index.name = 'timestamp'
+            df = df.reset_index()
+
+        cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume',
+                'dividends', 'stock_splits']
+        existing = [c for c in cols if c in df.columns]
+        df = df[existing]
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        return df
+
+    def upsert_data(self, market: str, table_name: str, df: pd.DataFrame) -> dict:
+        """Merge OHLCV rows by timestamp, allowing historical backfill."""
+        if df is None or df.empty:
+            return {
+                'input_rows': 0,
+                'inserted_rows': 0,
+                'updated_rows': 0,
+                'rows_before': 0,
+                'rows_after': 0,
+                'start_timestamp': None,
+                'end_timestamp': None,
+            }
+
+        incoming = self._normalize_ohlcv_for_write(df)
+        if incoming.empty or 'timestamp' not in incoming.columns:
+            return {
+                'input_rows': 0,
+                'inserted_rows': 0,
+                'updated_rows': 0,
+                'rows_before': 0,
+                'rows_after': 0,
+                'start_timestamp': None,
+                'end_timestamp': None,
+            }
+
+        url = self._data_url(market, table_name)
+        prev = self._try_read_parquet(url)
+        if not prev.empty and 'timestamp' in prev.columns:
+            prev = prev.copy()
+            prev['timestamp'] = pd.to_datetime(prev['timestamp'])
+        else:
+            prev = pd.DataFrame(columns=incoming.columns)
+
+        prev_ts = set(prev['timestamp'].dropna()) if 'timestamp' in prev.columns else set()
+        incoming_ts = set(incoming['timestamp'].dropna())
+        rows_before = len(prev)
+        inserted_rows = len(incoming_ts - prev_ts)
+        updated_rows = len(incoming_ts & prev_ts)
+
+        merged = pd.concat([prev, incoming], ignore_index=True)
+        merged = merged.drop_duplicates(subset=['timestamp'], keep='last')
+        merged = merged.sort_values('timestamp')
+        self._write_parquet(merged, url)
+
+        start_ts = merged['timestamp'].min() if not merged.empty else None
+        end_ts = merged['timestamp'].max() if not merged.empty else None
+        return {
+            'input_rows': len(incoming),
+            'inserted_rows': int(inserted_rows),
+            'updated_rows': int(updated_rows),
+            'rows_before': int(rows_before),
+            'rows_after': int(len(merged)),
+            'start_timestamp': start_ts.isoformat() if start_ts is not None and not pd.isna(start_ts) else None,
+            'end_timestamp': end_ts.isoformat() if end_ts is not None and not pd.isna(end_ts) else None,
+        }
+
+    def get_table_stats(self, market: str, table_name: str) -> dict:
+        url = self._data_url(market, table_name)
+        with self._io_lock:
+            try:
+                row = self._get_conn().execute(
+                    f"SELECT COUNT(*) AS rows, MIN(timestamp) AS first_timestamp, "
+                    f"MAX(timestamp) AS last_timestamp FROM read_parquet('{url}')"
+                ).fetchone()
+                if not row:
+                    return {'rows': 0, 'first_timestamp': None, 'last_timestamp': None}
+                return {
+                    'rows': int(row[0] or 0),
+                    'first_timestamp': row[1].isoformat() if row[1] else None,
+                    'last_timestamp': row[2].isoformat() if row[2] else None,
+                }
+            except Exception:
+                return {'rows': 0, 'first_timestamp': None, 'last_timestamp': None}
+
     def get_data(self, market: str, table_name: str, limit: int = 200) -> pd.DataFrame:
         url = self._data_url(market, table_name)
-        try:
-            return self._get_conn().execute(
-                f"SELECT * FROM read_parquet('{url}') "
-                f"ORDER BY timestamp DESC LIMIT {limit}"
-            ).fetchdf()
-        except Exception:
-            return pd.DataFrame()
+        with self._io_lock:
+            try:
+                return self._get_conn().execute(
+                    f"SELECT * FROM read_parquet('{url}') "
+                    f"ORDER BY timestamp DESC LIMIT {limit}"
+                ).fetchdf()
+            except Exception:
+                return pd.DataFrame()
 
     def drop_table(self, market: str, table_name: str):
         url = self._data_url(market, table_name)

@@ -63,6 +63,35 @@ class TestDatabaseManager:
         result = db.get_data('a', 'A_000001.SZ_daily')
         assert len(result) == 5
 
+    def test_upsert_data_backfills_and_updates(self, db):
+        dates = pd.date_range('2024-01-03', periods=3, freq='B')
+        df1 = pd.DataFrame({
+            'Open': [10.0, 11.0, 12.0],
+            'High': [11.0, 12.0, 13.0],
+            'Low': [9.0, 10.0, 11.0],
+            'Close': [10.5, 11.5, 12.5],
+            'Volume': [1000, 1000, 1000],
+        }, index=dates)
+        db.insert_data('a', 'A_000001.SZ_5min', df1)
+
+        dates2 = pd.to_datetime(['2024-01-01', '2024-01-03', '2024-01-08'])
+        df2 = pd.DataFrame({
+            'Open': [8.0, 10.0, 13.0],
+            'High': [9.0, 11.0, 14.0],
+            'Low': [7.0, 9.0, 12.0],
+            'Close': [8.5, 99.0, 13.5],
+            'Volume': [900, 999, 1000],
+        }, index=dates2)
+        stats = db.upsert_data('a', 'A_000001.SZ_5min', df2)
+
+        assert stats['input_rows'] == 3
+        assert stats['inserted_rows'] == 2
+        assert stats['updated_rows'] == 1
+        assert stats['rows_after'] == 5
+        result = db.get_data('a', 'A_000001.SZ_5min', limit=10)
+        row = result[pd.to_datetime(result['timestamp']) == pd.Timestamp('2024-01-03')].iloc[0]
+        assert row['close'] == 99.0
+
     def test_get_latest_timestamp(self, db):
         dates = pd.date_range('2024-01-01', periods=5, freq='B')
         df = pd.DataFrame({

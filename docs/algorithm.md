@@ -9,18 +9,18 @@
 设短期周期 `N_s = 26`，长期周期 `N_l = 90`。
 
 **短期通道**
-*   上轨：`EMA( RollingMax(High, N_s), N_s ) × (1 + offset)`
+*   上轨：`EMA( RollingMax(Close, N_s), N_s ) × (1 + offset)`（默认；`channel_upper_source='high'` 时可切回 High）
 *   下轨：`EMA( RollingMin(Low,  N_s), N_s ) × (1 − offset)`
 
 **长期通道**
-*   上轨：`EMA( RollingMax(High, N_l), N_l ) × (1 + offset)`
+*   上轨：`EMA( RollingMax(Close, N_l), N_l ) × (1 + offset)`（默认；`channel_upper_source='high'` 时可切回 High）
 *   下轨：`EMA( RollingMin(Low,  N_l), N_l ) × (1 − offset)`
 
-> **公式语义**：先用滚动窗口取过去 N 根 K 线的最高价 / 最低价，再对这条"近期高点序列 / 低点序列"做 EMA 平滑。这才是徐小明"多空通道"的本意：上轨追踪"近期高点中枢"，下轨追踪"近期低点中枢"。若直接对 High / Low 求 EMA，会退化成两条普通均线，丧失通道的支撑 / 阻力语义。
+> **公式语义**：先用滚动窗口取过去 N 根 K 线的收盘高点序列 / 最低价序列，再对极值序列做 EMA 平滑。默认用 Close 构建上轨，避免单根极端影线把通道虚胖；下轨仍使用 Low 捕捉真实下沿。若直接对 Close / Low 求 EMA，会退化成两条普通均线，丧失通道的支撑 / 阻力语义。
 
 **偏移 `offset`**：默认 `0.03`。**推荐采用自适应版本**：`offset = k × ATR(N) / Close`（k 默认 0.5），跨市场跨标的更稳定；如需固定值，允许配置常数。
 
-**设计依据**：徐小明"多空通道"指标。短期通道基于近 26 周期高低点的 EMA，长期基于近 90 周期高低点的 EMA。"分久必合，合久必分"，双通道的收敛与发散反映趋势强弱切换。
+**设计依据**：徐小明"多空通道"指标。短期通道基于近 26 周期收盘高点 / 最低点的 EMA，长期基于近 90 周期收盘高点 / 最低点的 EMA。"分久必合，合久必分"，双通道的收敛与发散反映趋势强弱切换。
 
 #### 2. 趋势判断与仓位量化
 
@@ -151,7 +151,7 @@ strictly_greater(a, b, eps = 0.001):
 
 `partial_bar` 仅允许展示；默认不参与交易确认。特别是 90min 尾巴 K 线不会单独触发结构交易信号，交易确认路径会取最后一根完整 90min K 线。
 
-> **采集策略**：所有市场只采集 5min K 线（A 股 / 港股走 akshare `*_hist_min_em(period='5')`，美股走 yfinance `interval='5m'`），高粒度由 `app/services/resample.py` 在决策时合成。这样一次性绕开 Yahoo 不支持 120m、yfinance 把 A 股小时线按美股 RTH 切片产生 12:30 伪 K 线、Yahoo 港股小时线返回空等三类数据源限制。
+> **采集策略**：所有市场只采集 5min K 线，业务层通过 `MarketDataSource.fetch_5m(FetchRequest)` 消费标准 OHLCV。当前默认主源为 iTick `/stock/kline`，akshare / yfinance 作为兼容兜底。高粒度由 `app/services/resample.py` 在决策时合成。这样避免直接依赖 Yahoo 的 120m、港股小时线和 A 股时区切片限制。
 
 **共振级别**：在 **60min / 90min / 120min** 三根周期上，同一方向（顶/底）同时处于结构有效期内时：
 
