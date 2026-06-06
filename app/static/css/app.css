@@ -750,7 +750,7 @@ h2 {
 
 .backtest-form {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-template-columns: repeat(12, minmax(0, 1fr));
   gap: 10px;
   align-items: end;
 }
@@ -764,6 +764,16 @@ h2 {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.backtest-form .checkbox-field {
+  align-items: center;
+  justify-items: start;
+}
+
+.backtest-form .checkbox-field input {
+  width: 18px;
+  height: 18px;
 }
 
 .backtest-metrics {

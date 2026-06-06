@@ -9,6 +9,7 @@ from typing import Dict
 class TrendState(str, Enum):
     UP_STRONG = 'UP_STRONG'
     UP_PULLBACK = 'UP_PULLBACK'
+    UP_WEAK = 'UP_WEAK'
     RANGE = 'RANGE'
     DOWN_REBOUND = 'DOWN_REBOUND'
     DOWN_STRONG = 'DOWN_STRONG'
@@ -59,6 +60,7 @@ POSITION_LABEL: Dict[float, str] = {
     8.0: '重仓',
     6.0: '重仓',
     4.0: '轻仓',
+    2.0: '轻仓',
     0.0: '空仓',
 }
 
@@ -72,10 +74,17 @@ class StrategyConfig:
     transition_decay_days: int = 3
     range_target_position: float = 4.0
     max_structure_adjustment: int = 2
+    normal_max_position_step: float = 2.0
+    long_mid_break_confirm_days: int = 2
+    atr_stop_multiple: float = 2.0
     max_chase_gap_pct: float | None = None
     max_chase_gap_atr_multiple: float = 0.8
     max_panic_gap_pct: float | None = None
     max_panic_gap_atr_multiple: float = 0.8
+    enable_trend: bool = True
+    enable_structure: bool = True
+    enable_sequence: bool = True
+    enable_execution_rules: bool = True
     structure_valid_days_by_period: Dict[str, int] = field(
         default_factory=lambda: {
             '60min': 1,

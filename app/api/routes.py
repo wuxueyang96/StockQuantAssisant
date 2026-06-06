@@ -390,6 +390,14 @@ def _parse_bars(default: int = 180) -> int:
     return max(20, min(bars, 500))
 
 
+def _parse_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ('0', 'false', 'no', 'off')
+    return bool(value)
+
+
 @api_bp.route('/stock/chart-data', methods=['GET'])
 def stock_chart_data():
     """返回浏览器绘图用 JSON，不再由后端渲染 PNG。"""
@@ -427,6 +435,8 @@ def stock_backtest():
     allowed = {
         'start_date', 'end_date', 'initial_cash', 'commission_rate',
         'slippage_bps', 'min_bars', 'lot_size', 'benchmark',
+        'enable_trend', 'enable_structure', 'enable_sequence',
+        'enable_execution_rules',
     }
     kwargs = {k: data[k] for k in allowed if k in data}
 
@@ -436,6 +446,12 @@ def stock_backtest():
         kwargs['slippage_bps'] = float(kwargs.get('slippage_bps', 5.0))
         kwargs['min_bars'] = int(kwargs.get('min_bars', 90))
         kwargs['lot_size'] = int(kwargs.get('lot_size', 1))
+        for key in (
+            'enable_trend', 'enable_structure', 'enable_sequence',
+            'enable_execution_rules',
+        ):
+            if key in kwargs:
+                kwargs[key] = _parse_bool(kwargs[key])
         payload = run_backtest(stock, **kwargs)
         return jsonify(payload)
     except ValueError as e:

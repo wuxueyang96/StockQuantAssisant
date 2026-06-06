@@ -190,6 +190,22 @@
                 <span>整手数量</span>
                 <input id="btLotSize" type="number" min="1" step="1" value="100">
               </label>
+              <label class="checkbox-field">
+                <span>趋势</span>
+                <input id="btEnableTrend" type="checkbox" checked>
+              </label>
+              <label class="checkbox-field">
+                <span>结构</span>
+                <input id="btEnableStructure" type="checkbox" checked>
+              </label>
+              <label class="checkbox-field">
+                <span>序列</span>
+                <input id="btEnableSequence" type="checkbox" checked>
+              </label>
+              <label class="checkbox-field">
+                <span>执行纪律</span>
+                <input id="btEnableExecutionRules" type="checkbox" checked>
+              </label>
               <button type="submit" class="primary-btn">运行回测</button>
             </form>
 
@@ -197,6 +213,13 @@
               <div class="metric"><span>总收益</span><strong id="btTotalReturn">--</strong></div>
               <div class="metric"><span>超额收益</span><strong id="btExcessReturn">--</strong></div>
               <div class="metric"><span>最大回撤</span><strong id="btMaxDrawdown">--</strong></div>
+              <div class="metric"><span>上涨捕获</span><strong id="btUpCapture">--</strong></div>
+              <div class="metric"><span>下跌捕获</span><strong id="btDownCapture">--</strong></div>
+              <div class="metric"><span>平均仓位</span><strong id="btAvgPosition">--</strong></div>
+              <div class="metric"><span>上涨日仓位</span><strong id="btAvgPositionUp">--</strong></div>
+              <div class="metric"><span>错过上涨</span><strong id="btMissedUpside">--</strong></div>
+              <div class="metric"><span>目标翻转</span><strong id="btTargetFlipCount">--</strong></div>
+              <div class="metric"><span>趋势分布</span><strong id="btTrendDistribution">--</strong></div>
               <div class="metric"><span>Sharpe</span><strong id="btSharpe">--</strong></div>
               <div class="metric"><span>交易次数</span><strong id="btTradeCount">--</strong></div>
               <div class="metric"><span>胜率</span><strong id="btWinRate">--</strong></div>
@@ -240,10 +263,15 @@
                       <th>成交额</th>
                       <th>目标仓位(0-10)</th>
                       <th>已实现盈亏</th>
+                      <th>信号原因</th>
+                      <th>趋势状态</th>
+                      <th>结构影响</th>
+                      <th>序列影响</th>
+                      <th>Hard Exit</th>
                     </tr>
                   </thead>
                   <tbody id="tradeTableBody">
-                    <tr><td colspan="8">暂无交易</td></tr>
+                    <tr><td colspan="13">暂无交易</td></tr>
                   </tbody>
                 </table>
               </div>

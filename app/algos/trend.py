@@ -63,7 +63,12 @@ def compute_channels(df: pd.DataFrame, config: StrategyConfig = DEFAULT_CONFIG) 
     result['long_mid'] = (result['long_upper'] + result['long_lower']) / 2
 
     atr = _compute_atr(df, config.atr_period)
+    result['atr'] = atr
     result['atr_pct'] = (atr / df['Close']).replace([np.inf, -np.inf], np.nan)
+    result['atr_stop_line'] = (
+        df['Close'].rolling(config.atr_period, min_periods=1).max()
+        - atr * config.atr_stop_multiple
+    )
 
     return result
 
@@ -74,6 +79,10 @@ def classify_trend_state(
     short_lower_prev: float,
     long_upper_prev: float,
     long_lower_prev: float,
+    short_mid_prev: float = np.nan,
+    long_mid_prev: float = np.nan,
+    short_mid_slope: float = np.nan,
+    long_mid_slope: float = np.nan,
 ) -> TrendState:
     """根据 T 日收盘价与 T-1 轨线判定趋势状态（**无未来函数**）。"""
     vals = (short_upper_prev, short_lower_prev, long_upper_prev, long_lower_prev)
@@ -84,8 +93,28 @@ def classify_trend_state(
         return TrendState.UP_STRONG
     if close < short_lower_prev and close < long_lower_prev:
         return TrendState.DOWN_STRONG
-    if close < short_lower_prev and close > long_upper_prev:
+
+    long_mid_up = (
+        pd.notna(long_mid_prev)
+        and pd.notna(long_mid_slope)
+        and close > long_mid_prev
+        and long_mid_slope > 0
+    )
+    emerging_up = (
+        pd.notna(long_mid_prev)
+        and pd.notna(short_mid_slope)
+        and close > long_mid_prev
+        and close > short_upper_prev
+        and short_mid_slope > 0
+    )
+    if close < short_lower_prev and (close > long_upper_prev or long_mid_up):
         return TrendState.UP_PULLBACK
+
+    if long_mid_up or emerging_up:
+        if pd.notna(short_mid_prev) and close >= short_mid_prev:
+            return TrendState.UP_PULLBACK
+        return TrendState.UP_WEAK
+
     if close > short_upper_prev and close < long_upper_prev:
         return TrendState.DOWN_REBOUND
     return TrendState.RANGE
@@ -95,13 +124,15 @@ def _state_targets(state: TrendState, previous_position: float,
                    transition_days: int, config: StrategyConfig) -> Tuple[float, float, float, str]:
     """返回 (base_target, cap, floor, reason)。"""
     if state == TrendState.UP_STRONG:
-        return 10.0, 10.0, 6.0, '收盘价突破短/长上轨（基于昨日轨线），强上升趋势'
+        return 10.0, 10.0, 8.0, '收盘价突破短/长上轨（基于昨日轨线），强上升趋势'
     if state == TrendState.UP_PULLBACK:
-        return 6.0, 8.0, 4.0, '长期向上、短期跌破短下轨（基于昨日轨线），上升趋势回调'
+        return 8.0, 10.0, 6.0, '长期向上或长中轨上行，短期回调但多头未破坏'
+    if state == TrendState.UP_WEAK:
+        return 6.0, 8.0, 4.0, '收盘价位于上行长中轨之上，多头弱势延续'
     if state == TrendState.DOWN_STRONG:
         return 0.0, 0.0, 0.0, '收盘价跌破短/长下轨（基于昨日轨线），强下降趋势'
     if state == TrendState.DOWN_REBOUND:
-        return 4.0, 4.0, 0.0, '短期突破短上轨但仍在长上轨下方，下降中的反弹'
+        return 2.0, 4.0, 0.0, '短期突破短上轨但仍在长上轨下方，下降中的反弹'
     if state == TrendState.RANGE:
         if transition_days >= config.transition_decay_days:
             base = config.range_target_position
@@ -112,7 +143,7 @@ def _state_targets(state: TrendState, previous_position: float,
         else:
             base = config.range_target_position
             reason = f'震荡/无明确趋势，使用区间目标仓位 {base}'
-        return base, 4.0, 0.0, reason
+        return base, 6.0, 0.0, reason
     return np.nan, 0.0, 0.0, '数据不足或冷启动'
 
 
@@ -132,6 +163,7 @@ def compute_trend_decision(
     prev_positions = []
     transition_days_list = []
     qualities = []
+    long_mid_bear_confirm_days = 0
 
     prev_position = np.nan
     transition_days = 0
@@ -139,17 +171,45 @@ def compute_trend_decision(
     for i in range(n):
         row = ch.iloc[i]
         close = row['Close']
+        sm_slope = np.nan
+        lm_slope = np.nan
 
         if i == 0:
             sh_up_p = sh_lo_p = lg_up_p = lg_lo_p = np.nan
+            sh_mid_p = lg_mid_p = np.nan
         else:
             prev = ch.iloc[i - 1]
             sh_up_p = prev['short_upper']
             sh_lo_p = prev['short_lower']
             lg_up_p = prev['long_upper']
             lg_lo_p = prev['long_lower']
+            sh_mid_p = prev['short_mid']
+            lg_mid_p = prev['long_mid']
+            sm0, sm1 = ch['short_mid'].iloc[i - 1], ch['short_mid'].iloc[i]
+            lm0, lm1 = ch['long_mid'].iloc[i - 1], ch['long_mid'].iloc[i]
+            if pd.notna(sm0) and pd.notna(sm1) and sm0 != 0:
+                sm_slope = (sm1 - sm0) / sm0
+            if pd.notna(lm0) and pd.notna(lm1) and lm0 != 0:
+                lm_slope = (lm1 - lm0) / lm0
 
-        state = classify_trend_state(close, sh_up_p, sh_lo_p, lg_up_p, lg_lo_p)
+        if (
+            pd.notna(close)
+            and pd.notna(lg_mid_p)
+            and pd.notna(lm_slope)
+            and close < lg_mid_p
+            and lm_slope <= 0
+        ):
+            long_mid_bear_confirm_days += 1
+        else:
+            long_mid_bear_confirm_days = 0
+
+        state = classify_trend_state(
+            close, sh_up_p, sh_lo_p, lg_up_p, lg_lo_p,
+            short_mid_prev=sh_mid_p,
+            long_mid_prev=lg_mid_p,
+            short_mid_slope=sm_slope,
+            long_mid_slope=lm_slope,
+        )
         states.append(state.value)
 
         if state == TrendState.UNKNOWN:
@@ -174,16 +234,6 @@ def compute_trend_decision(
         if not pd.isna(base):
             prev_position = base
 
-        # 质量指标
-        sm_slope = np.nan
-        lm_slope = np.nan
-        if i >= 1:
-            sm0, sm1 = ch['short_mid'].iloc[i - 1], ch['short_mid'].iloc[i]
-            lm0, lm1 = ch['long_mid'].iloc[i - 1], ch['long_mid'].iloc[i]
-            if pd.notna(sm0) and pd.notna(sm1) and sm0 != 0:
-                sm_slope = (sm1 - sm0) / sm0
-            if pd.notna(lm0) and pd.notna(lm1) and lm0 != 0:
-                lm_slope = (lm1 - lm0) / lm0
         width_pct = np.nan
         if pd.notna(row['short_upper']) and pd.notna(row['short_lower']) and close:
             width_pct = (row['short_upper'] - row['short_lower']) / close
@@ -192,6 +242,7 @@ def compute_trend_decision(
             'long_mid_slope': lm_slope,
             'channel_width_pct': width_pct,
             'atr_pct': row.get('atr_pct', np.nan),
+            'long_mid_bear_confirm_days': long_mid_bear_confirm_days,
         })
 
     out = ch.copy()
@@ -207,10 +258,16 @@ def compute_trend_decision(
     out['short_lower_prev'] = out['short_lower'].shift(1)
     out['long_upper_prev'] = out['long_upper'].shift(1)
     out['long_lower_prev'] = out['long_lower'].shift(1)
+    out['short_mid_prev'] = out['short_mid'].shift(1)
+    out['long_mid_prev'] = out['long_mid'].shift(1)
+    out['atr_stop_line_prev'] = out['atr_stop_line'].shift(1)
 
     out['short_mid_slope'] = [q['short_mid_slope'] for q in qualities]
     out['long_mid_slope'] = [q['long_mid_slope'] for q in qualities]
     out['channel_width_pct'] = [q['channel_width_pct'] for q in qualities]
+    out['long_mid_bear_confirm_days'] = [
+        q['long_mid_bear_confirm_days'] for q in qualities
+    ]
 
     # 向后兼容：position = 趋势层 base_target_position
     out['position'] = out['base_target_position']

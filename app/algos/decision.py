@@ -152,11 +152,15 @@ class DecisionEngine:
             result.at[idx, 'structure_adjustment'] = struct_adj
             result.at[idx, 'position_label'] = pos_label
             result.at[idx, 'core_long'] = (
-                float(trend_row.get('base_target_position') or 0) >= 6
+                decision.final_target_position is not None
+                and pd.notna(decision.final_target_position)
+                and float(decision.final_target_position) >= 6
                 and struct_ctx.get('bottom_active')
             )
             result.at[idx, 'core_short'] = (
-                float(trend_row.get('base_target_position') or 10) <= 4
+                decision.final_target_position is not None
+                and pd.notna(decision.final_target_position)
+                and float(decision.final_target_position) <= 4
                 and struct_ctx.get('top_active')
             )
             result.at[idx, 'resonance_buy'] = (
@@ -183,6 +187,7 @@ class DecisionEngine:
     _TREND_STATE_LABEL = {
         TrendState.UP_STRONG.value: '上升',
         TrendState.UP_PULLBACK.value: '上升',
+        TrendState.UP_WEAK.value: '上升',
         TrendState.RANGE.value: '横盘',
         TrendState.DOWN_REBOUND.value: '下降',
         TrendState.DOWN_STRONG.value: '下降',

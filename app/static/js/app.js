@@ -65,6 +65,13 @@ function fmtMoney(value, fallback = '--') {
   return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
 }
 
+function fmtDistribution(value, fallback = '--') {
+  if (!value || typeof value !== 'object') return fallback;
+  const entries = Object.entries(value);
+  if (!entries.length) return fallback;
+  return entries.map(([key, count]) => `${key}:${count}`).join(' ');
+}
+
 function fmtDuration(seconds) {
   const value = Math.max(0, Number(seconds || 0));
   if (value < 60) return `${Math.ceil(value)} 秒`;
@@ -1672,6 +1679,10 @@ async function runBacktest(forceTab = true) {
       slippage_bps: Number($('btSlippage').value || 0),
       min_bars: Number($('btMinBars').value || 90),
       lot_size: Math.max(1, Number($('btLotSize').value || 100)),
+      enable_trend: $('btEnableTrend').checked,
+      enable_structure: $('btEnableStructure').checked,
+      enable_sequence: $('btEnableSequence').checked,
+      enable_execution_rules: $('btEnableExecutionRules').checked,
     };
     const resp = await fetch('/api/stock/backtest', {
       method: 'POST',
@@ -1703,6 +1714,13 @@ function renderBacktest(result) {
   $('btTotalReturn').textContent = fmtPct(metrics.total_return);
   $('btExcessReturn').textContent = fmtPct(metrics.excess_return);
   $('btMaxDrawdown').textContent = fmtPct(metrics.max_drawdown);
+  $('btUpCapture').textContent = fmtPct(metrics.up_capture_ratio);
+  $('btDownCapture').textContent = fmtPct(metrics.down_capture_ratio);
+  $('btAvgPosition').textContent = fmtPct(metrics.avg_position ?? metrics.average_position);
+  $('btAvgPositionUp').textContent = fmtPct(metrics.avg_position_on_up_days);
+  $('btMissedUpside').textContent = fmtPct(metrics.missed_upside_return);
+  $('btTargetFlipCount').textContent = fmt(metrics.target_flip_count);
+  $('btTrendDistribution').textContent = fmtDistribution(metrics.trend_state_days_distribution);
   $('btSharpe').textContent = fmt(metrics.sharpe);
   $('btTradeCount').textContent = fmt(metrics.trade_count);
   $('btWinRate').textContent = fmtPct(metrics.win_rate);
@@ -1864,7 +1882,7 @@ function renderTrades(trades) {
   if (!trades.length) {
     const row = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = 8;
+    cell.colSpan = 13;
     cell.textContent = '暂无交易';
     row.appendChild(cell);
     body.appendChild(row);
@@ -1881,6 +1899,11 @@ function renderTrades(trades) {
       fmtMoney(trade.gross_value),
       fmt(trade.target_position),
       fmtMoney(trade.realized_pnl),
+      trade.signal_reason || '',
+      trade.trend_state || '',
+      trade.structure_effect || '',
+      trade.sequence_effect || '',
+      trade.hard_exit ? '是' : '否',
     ].forEach((value) => {
       const td = document.createElement('td');
       td.textContent = value;

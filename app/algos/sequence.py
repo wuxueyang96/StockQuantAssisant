@@ -180,15 +180,15 @@ def compute_sequence_execution_rules(
         rules.append('NO_CHASE')
         if ts == TrendState.UP_STRONG.value and top_structure_active:
             rules.append('TRIM_ALLOWED')
-        if ts in (TrendState.DOWN_REBOUND.value, TrendState.DOWN_STRONG.value):
-            rules.append('REBOUND_SELL_CANDIDATE')
 
     if low9_active:
         rules.append('NO_PANIC_SELL')
-        if ts in (TrendState.UP_STRONG.value, TrendState.UP_PULLBACK.value) and bottom_structure_active:
+        if ts in (
+            TrendState.UP_STRONG.value,
+            TrendState.UP_PULLBACK.value,
+            TrendState.UP_WEAK.value,
+        ) and bottom_structure_active:
             rules.append('PULLBACK_BUY_CANDIDATE')
-        if ts == TrendState.DOWN_STRONG.value:
-            rules.append('BOTTOM_WATCH')
 
     # 去重保序
     seen: Set[str] = set()

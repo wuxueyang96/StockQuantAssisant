@@ -626,6 +626,9 @@ def compute_structure_adjustment(
         elif ts == TrendState.UP_PULLBACK.value:
             adj = -1
             warnings.append('NO_CHASE')
+        elif ts == TrendState.UP_WEAK.value:
+            adj = -min(2, max_adj)
+            warnings.extend(['NO_CHASE', 'TRIM_ALLOWED'])
         elif ts in (TrendState.DOWN_REBOUND.value, TrendState.DOWN_STRONG.value):
             adj = -1
             warnings.append('SELL_PRIORITY')
@@ -634,10 +637,10 @@ def compute_structure_adjustment(
             warnings.append('RANGE_UPPER_EDGE')
 
     if bot_active:
-        if ts in (TrendState.UP_STRONG.value, TrendState.UP_PULLBACK.value):
+        if ts in (TrendState.UP_STRONG.value, TrendState.UP_PULLBACK.value, TrendState.UP_WEAK.value):
             bot_adj = min(2, max_adj)
             adj = max(adj, bot_adj) if adj > 0 else bot_adj
-            if ts == TrendState.UP_PULLBACK.value:
+            if ts in (TrendState.UP_PULLBACK.value, TrendState.UP_WEAK.value):
                 warnings.append('PULLBACK_BUY_CANDIDATE')
         elif ts == TrendState.DOWN_STRONG.value:
             warnings.extend(['NO_PANIC_SELL', 'BOTTOM_WATCH'])

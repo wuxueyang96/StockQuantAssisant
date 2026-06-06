@@ -583,6 +583,10 @@ curl "http://127.0.0.1:5555/api/stock/chart-data?stock=300274&bars=120"
 | `slippage_bps` | number | 否 | 5 | 单边滑点 bps |
 | `min_bars` | int | 否 | 90 | 最少日线数量 |
 | `lot_size` | int | 否 | 1 | 下单数量向下取整的最小单位 |
+| `enable_trend` | bool | 否 | true | 是否启用趋势层；false 时按买入持有模拟 |
+| `enable_structure` | bool | 否 | true | 是否启用结构层修边 |
+| `enable_sequence` | bool | 否 | true | 是否启用九转序列层 |
+| `enable_execution_rules` | bool | 否 | true | 是否启用 NO_CHASE / NO_PANIC_SELL 等执行纪律 |
 
 **响应** `200`
 ```json
@@ -599,12 +603,31 @@ curl "http://127.0.0.1:5555/api/stock/chart-data?stock=300274&bars=120"
       "sharpe": 1.2,
       "trade_count": 8,
       "benchmark_total_return": 0.09,
-      "excess_return": 0.03
+      "excess_return": 0.03,
+      "avg_position": 0.75,
+      "avg_position_on_up_days": 0.8,
+      "avg_position_on_down_days": 0.7,
+      "up_capture_ratio": 0.82,
+      "down_capture_ratio": 0.65,
+      "cumulative_allocation_drag": -0.04,
+      "cumulative_cost_drag": 0.002,
+      "missed_upside_return": 0.05,
+      "target_flip_count": 0,
+      "trend_state_days_distribution": {
+        "UP_STRONG": 30,
+        "UP_WEAK": 20
+      }
     },
     "equity_curve": [],
     "drawdown": [],
     "positions": [],
-    "trades": [],
+    "trades": [{
+      "signal_reason": "趋势 UP_STRONG；结构修正 -2",
+      "trend_state": "UP_STRONG",
+      "structure_effect": "adjustment=-2; event=top_100",
+      "sequence_effect": "high9; rules=NO_CHASE",
+      "hard_exit": false
+    }],
     "signals": []
   }]
 }

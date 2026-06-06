@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from app.algos.config import StrategyConfig
 from app.algos.integrated_decision import (
     INTRADAY_STRUCTURE_INTERVALS,
     evaluate_integrated_dataframe,
@@ -100,6 +101,41 @@ def _target_weight(row: pd.Series) -> Optional[float]:
     return float(np.clip(float(target) / 10.0, 0.0, 1.0))
 
 
+def _strategy_config_from_backtest(config: BacktestConfig) -> StrategyConfig:
+    return StrategyConfig(
+        enable_trend=bool(config.enable_trend),
+        enable_structure=bool(config.enable_structure),
+        enable_sequence=bool(config.enable_sequence),
+        enable_execution_rules=bool(config.enable_execution_rules),
+    )
+
+
+def _buy_hold_decisions(daily: pd.DataFrame) -> pd.DataFrame:
+    decisions = pd.DataFrame(index=daily.index)
+    decisions['final_target_position'] = 10.0
+    decisions['raw_target_position'] = 10.0
+    decisions['actual_position'] = 10.0
+    decisions['order_delta'] = 0.0
+    decisions['order_weight'] = 0.0
+    decisions['action'] = 'HOLD'
+    decisions['confidence_label'] = 'benchmark'
+    decisions['trend_state'] = 'BUY_HOLD'
+    decisions['structure_adjustment'] = 0.0
+    decisions['sequence_adjustment'] = 0.0
+    decisions['decision_reason'] = '买入持有基准'
+    decisions['structure_effect'] = 'none'
+    decisions['sequence_effect'] = 'none'
+    decisions['hard_exit'] = False
+    decisions['high9_active'] = False
+    decisions['low9_active'] = False
+    if len(decisions):
+        decisions.iloc[0, decisions.columns.get_loc('actual_position')] = 0.0
+        decisions.iloc[0, decisions.columns.get_loc('order_delta')] = 10.0
+        decisions.iloc[0, decisions.columns.get_loc('order_weight')] = 1.0
+        decisions.iloc[0, decisions.columns.get_loc('action')] = 'BUY'
+    return decisions
+
+
 def _round_lot(quantity: float, lot_size: int) -> float:
     lot = max(1, int(lot_size or 1))
     if lot <= 1:
@@ -134,6 +170,13 @@ def _build_signals(
             'confidence_label': row.get('confidence_label'),
             'trend_state': row.get('trend_state'),
             'structure_adjustment': _round(row.get('structure_adjustment'), 4),
+            'sequence_adjustment': _round(row.get('sequence_adjustment'), 4),
+            'signal_reason': row.get('decision_reason') or '',
+            'structure_effect': row.get('structure_effect') or 'none',
+            'sequence_effect': row.get('sequence_effect') or 'none',
+            'hard_exit': bool(row.get('hard_exit', False)),
+            'hard_exit_reason': row.get('hard_exit_reason') or '',
+            'target_reversal_warning': row.get('target_reversal_warning') or '',
             'high9_active': bool(row.get('high9_active', False)),
             'low9_active': bool(row.get('low9_active', False)),
         })
@@ -177,6 +220,7 @@ def simulate_backtest(
     trades: list[TradeRecord] = []
     realized: list[float] = []
     turnover_value = 0.0
+    cost_drag_value = 0.0
     first_close = float(daily['Close'].iloc[sim_indices[0]])
     running_peak = float(config.initial_cash)
 
@@ -202,6 +246,7 @@ def simulate_backtest(
                         gross = min(delta_value, cash / (1.0 + commission_rate))
                         qty = _round_lot(gross / price, config.lot_size)
                         if qty > 0:
+                            slippage_cost = qty * open_price * slip
                             gross = qty * price
                             commission = gross * commission_rate
                             if gross + commission <= cash + 1e-9:
@@ -211,6 +256,7 @@ def simulate_backtest(
                                 ) / (shares + qty)
                                 shares += qty
                                 turnover_value += gross
+                                cost_drag_value += commission + slippage_cost
                                 trades.append(TradeRecord(
                                     date=_to_iso(ts),
                                     signal_date=_to_iso(signal_ts),
@@ -225,6 +271,11 @@ def simulate_backtest(
                                     target_position=_round(signal.get('final_target_position'), 4),
                                     target_weight=_round(target_weight, 4),
                                     confidence_label=signal.get('confidence_label'),
+                                    signal_reason=signal.get('decision_reason') or '',
+                                    trend_state=signal.get('trend_state') or '',
+                                    structure_effect=signal.get('structure_effect') or 'none',
+                                    sequence_effect=signal.get('sequence_effect') or 'none',
+                                    hard_exit=bool(signal.get('hard_exit', False)),
                                 ))
 
                     elif delta_value < -1e-9 and shares > 0:
@@ -232,6 +283,7 @@ def simulate_backtest(
                         desired_qty = (-delta_value) / price
                         qty = min(shares, _round_lot(desired_qty, config.lot_size))
                         if qty > 0:
+                            slippage_cost = qty * open_price * slip
                             gross = qty * price
                             commission = gross * commission_rate
                             cash += gross - commission
@@ -242,6 +294,7 @@ def simulate_backtest(
                                 avg_cost = 0.0
                             realized.append(float(pnl))
                             turnover_value += gross
+                            cost_drag_value += commission + slippage_cost
                             trades.append(TradeRecord(
                                 date=_to_iso(ts),
                                 signal_date=_to_iso(signal_ts),
@@ -257,6 +310,11 @@ def simulate_backtest(
                                 target_weight=_round(target_weight, 4),
                                 realized_pnl=_round(pnl, 4),
                                 confidence_label=signal.get('confidence_label'),
+                                signal_reason=signal.get('decision_reason') or '',
+                                trend_state=signal.get('trend_state') or '',
+                                structure_effect=signal.get('structure_effect') or 'none',
+                                sequence_effect=signal.get('sequence_effect') or 'none',
+                                hard_exit=bool(signal.get('hard_exit', False)),
                             ))
 
         close = float(row['Close'])
@@ -286,6 +344,10 @@ def simulate_backtest(
         realized=realized,
         initial_cash=float(config.initial_cash),
         turnover_value=turnover_value,
+        cost_drag_value=cost_drag_value,
+        daily=daily,
+        decisions=decisions,
+        sim_indices=sim_indices,
     )
     signals = _build_signals(daily, decisions, start, end)
     return BacktestResult(
@@ -304,12 +366,17 @@ def _compute_metrics(
     realized: list[float],
     initial_cash: float,
     turnover_value: float,
+    cost_drag_value: float = 0.0,
+    daily: Optional[pd.DataFrame] = None,
+    decisions: Optional[pd.DataFrame] = None,
+    sim_indices: Optional[list[int]] = None,
 ) -> BacktestMetrics:
     if not equity_curve:
         return BacktestMetrics()
 
     equity = pd.Series([p.equity for p in equity_curve], dtype='float64')
-    returns = equity.pct_change().dropna()
+    returns = equity.pct_change()
+    returns_no_na = returns.dropna()
     final_equity = float(equity.iloc[-1])
     total_return = final_equity / initial_cash - 1.0
     periods = len(equity_curve)
@@ -317,10 +384,10 @@ def _compute_metrics(
         (final_equity / initial_cash) ** (252.0 / max(periods - 1, 1)) - 1.0
         if final_equity > 0 else -1.0
     )
-    annual_vol = float(returns.std(ddof=0) * math.sqrt(252)) if len(returns) else 0.0
+    annual_vol = float(returns_no_na.std(ddof=0) * math.sqrt(252)) if len(returns_no_na) else 0.0
     sharpe = None
-    if len(returns) and float(returns.std(ddof=0)) > 0:
-        sharpe = float(returns.mean() / returns.std(ddof=0) * math.sqrt(252))
+    if len(returns_no_na) and float(returns_no_na.std(ddof=0)) > 0:
+        sharpe = float(returns_no_na.mean() / returns_no_na.std(ddof=0) * math.sqrt(252))
 
     dd = [p.drawdown for p in equity_curve]
     max_drawdown = min(dd) if dd else 0.0
@@ -335,11 +402,92 @@ def _compute_metrics(
         profit_factor = None
 
     positions = [p.position_weight for p in equity_curve]
+    position_series = pd.Series(positions, dtype='float64')
     avg_equity = float(equity.mean()) if len(equity) else initial_cash
     benchmark_return = (
         equity_curve[-1].benchmark_equity / initial_cash - 1.0
         if initial_cash > 0 else 0.0
     )
+    avg_position = float(position_series.mean()) if len(position_series) else 0.0
+
+    avg_position_on_up_days = 0.0
+    avg_position_on_down_days = 0.0
+    up_capture_ratio = 0.0
+    down_capture_ratio = 0.0
+    cumulative_allocation_drag = 0.0
+    missed_upside_return = 0.0
+    target_flip_count = 0
+    count_10_to_4 = 0
+    count_4_to_10 = 0
+    below_60_long_up_days = 0
+    structure_reduction_days = 0
+    sequence_reduction_days = 0
+    trend_distribution: Dict[str, int] = {}
+
+    if daily is not None and sim_indices is not None and len(sim_indices) == len(equity_curve):
+        close = pd.Series(
+            [float(daily['Close'].iloc[i]) for i in sim_indices],
+            dtype='float64',
+        )
+        benchmark_returns = close.pct_change()
+        aligned_strategy_returns = returns.iloc[1:]
+        aligned_benchmark_returns = benchmark_returns.iloc[1:]
+        aligned_positions = position_series.iloc[1:]
+
+        up_mask = aligned_benchmark_returns > 0
+        down_mask = aligned_benchmark_returns < 0
+        if bool(up_mask.any()):
+            avg_position_on_up_days = float(aligned_positions[up_mask].mean())
+            denom = float(aligned_benchmark_returns[up_mask].sum())
+            up_capture_ratio = (
+                float(aligned_strategy_returns[up_mask].sum()) / denom
+                if abs(denom) > 1e-12 else 0.0
+            )
+        if bool(down_mask.any()):
+            avg_position_on_down_days = float(aligned_positions[down_mask].mean())
+            denom = float(aligned_benchmark_returns[down_mask].sum())
+            down_capture_ratio = (
+                float(aligned_strategy_returns[down_mask].sum()) / denom
+                if abs(denom) > 1e-12 else 0.0
+            )
+
+        prev_positions = position_series.iloc[:-1].reset_index(drop=True)
+        bench_no_na = aligned_benchmark_returns.reset_index(drop=True)
+        cumulative_allocation_drag = float(((prev_positions - 1.0) * bench_no_na).sum())
+        missed_upside_return = float(
+            ((1.0 - prev_positions).clip(lower=0.0) * bench_no_na.clip(lower=0.0)).sum()
+        )
+
+        if decisions is not None and not decisions.empty:
+            decision_window = decisions.reindex(daily.index).iloc[sim_indices]
+            trend_states = decision_window.get('trend_state', pd.Series(index=decision_window.index, dtype='object'))
+            trend_distribution = {
+                str(k): int(v)
+                for k, v in trend_states.fillna('UNKNOWN').value_counts().to_dict().items()
+            }
+            long_up = trend_states.isin(['UP_STRONG', 'UP_PULLBACK', 'UP_WEAK'])
+            below_60_long_up_days = int(((position_series < 0.6).values & long_up.fillna(False).values).sum())
+            structure_adj = pd.to_numeric(
+                decision_window.get('structure_adjustment', pd.Series(index=decision_window.index)),
+                errors='coerce',
+            ).fillna(0.0)
+            sequence_adj = pd.to_numeric(
+                decision_window.get('sequence_adjustment', pd.Series(index=decision_window.index)),
+                errors='coerce',
+            ).fillna(0.0)
+            structure_reduction_days = int((structure_adj < 0).sum())
+            sequence_reduction_days = int((sequence_adj < 0).sum())
+
+            targets = pd.to_numeric(
+                decision_window.get('final_target_position', pd.Series(index=decision_window.index)),
+                errors='coerce',
+            ).dropna()
+            if len(targets) >= 2:
+                prev_targets = targets.shift(1)
+                target_flip_count = int((targets.sub(prev_targets).abs() >= 4.0).sum())
+                count_10_to_4 = int(((prev_targets >= 9.5) & (targets <= 4.5)).sum())
+                count_4_to_10 = int(((prev_targets <= 4.5) & (targets >= 9.5)).sum())
+
     return BacktestMetrics(
         total_return=_round(total_return, 6),
         annual_return=_round(annual_return, 6),
@@ -351,7 +499,22 @@ def _compute_metrics(
         trade_count=len(trades),
         winning_trades=len(wins),
         losing_trades=len(losses),
-        average_position=_round(float(np.mean(positions)) if positions else 0.0, 6),
+        average_position=_round(avg_position, 6),
+        avg_position=_round(avg_position, 6),
+        avg_position_on_up_days=_round(avg_position_on_up_days, 6),
+        avg_position_on_down_days=_round(avg_position_on_down_days, 6),
+        up_capture_ratio=_round(up_capture_ratio, 6),
+        down_capture_ratio=_round(down_capture_ratio, 6),
+        cumulative_allocation_drag=_round(cumulative_allocation_drag, 6),
+        cumulative_cost_drag=_round(cost_drag_value / initial_cash if initial_cash > 0 else 0.0, 6),
+        missed_upside_return=_round(missed_upside_return, 6),
+        target_flip_count=target_flip_count,
+        count_10_to_4=count_10_to_4,
+        count_4_to_10=count_4_to_10,
+        days_position_below_60pct_when_long_trend_up=below_60_long_up_days,
+        structure_caused_reduction_days=structure_reduction_days,
+        sequence_caused_reduction_days=sequence_reduction_days,
+        trend_state_days_distribution=trend_distribution,
         exposure=_round(float(np.mean([p > 0.01 for p in positions])) if positions else 0.0, 6),
         turnover=_round(turnover_value / avg_equity if avg_equity > 0 else 0.0, 6),
         benchmark_total_return=_round(benchmark_return, 6),
@@ -373,7 +536,14 @@ def run_backtest_for_market(
     if daily is None or len(daily) < int(config.min_bars):
         raise ValueError(f'5min 数据不足以合成回测日线（至少需要 {config.min_bars} 根日线）')
 
-    decisions = evaluate_integrated_dataframe(daily, intraday)
+    if config.enable_trend:
+        decisions = evaluate_integrated_dataframe(
+            daily,
+            intraday,
+            config=_strategy_config_from_backtest(config),
+        )
+    else:
+        decisions = _buy_hold_decisions(daily)
     result = simulate_backtest(daily, decisions, config)
     payload = result.to_api_dict()
     payload.update({

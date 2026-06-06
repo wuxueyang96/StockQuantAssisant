@@ -28,18 +28,19 @@
 
 | trend_state | 条件（均使用 T-1 轨线） | base | cap | floor | 含义 |
 |-------------|--------------------------|------|-----|-------|------|
-| `UP_STRONG` | `Close_T > short_upper_{T-1}` 且 `Close_T > long_upper_{T-1}` | 10 | 10 | 6 | 强上升趋势 |
+| `UP_STRONG` | `Close_T > short_upper_{T-1}` 且 `Close_T > long_upper_{T-1}` | 10 | 10 | 8 | 强上升趋势 |
 | `DOWN_STRONG` | `Close_T < short_lower_{T-1}` 且 `Close_T < long_lower_{T-1}` | 0 | 0 | 0 | 强下降趋势 |
-| `UP_PULLBACK` | `Close_T < short_lower_{T-1}` 且 `Close_T > long_upper_{T-1}` | 6 | 8 | 4 | 上升趋势中的短期回调 |
-| `DOWN_REBOUND` | `Close_T > short_upper_{T-1}` 且 `Close_T < long_upper_{T-1}` | 4 | 4 | 0 | 下降趋势中的短期反弹 |
-| `RANGE` | 其他可判定状态 | 继承或衰减至 `range_target_position`（默认 4） | 4 | 0 | 震荡 / 无明确趋势 |
+| `UP_PULLBACK` | 长趋势仍向上，或 `Close_T > long_mid_{T-1}` 且长中轨/短中轨转强 | 8 | 10 | 6 | 上升趋势回调，多头未破坏 |
+| `UP_WEAK` | `Close_T > long_mid_{T-1}` 且中轨转强，但强度不足以判为回调恢复 | 6 | 8 | 4 | 弱多头延续 |
+| `DOWN_REBOUND` | `Close_T > short_upper_{T-1}` 且仍未恢复长中轨/长上轨强势 | 2 | 4 | 0 | 下降趋势中的短期反弹 |
+| `RANGE` | 其他可判定状态 | 继承或衰减至 `range_target_position`（默认 4） | 6 | 0 | 震荡 / 无明确趋势 |
 | `UNKNOWN` | 冷启动或数据不足 | — | — | — | 不产生交易动作 |
 
 **冷启动**：首次有效仓位形成之前，`position = NaN`，不产生 BS 点。
 
 **突破有效性**：趋势层只判断收盘价是否跨越 T-1 已确定轨线。额外的突破缓冲、ATR 过滤、连续确认或执行保护不写入趋势线本身，应由 decision 层在生成最终动作时处理。
 
-**趋势质量指标**：趋势层同时输出 `short_mid_slope`、`long_mid_slope`、`channel_width_pct`、`atr_pct`。其中 `atr_pct` 作为质量指标和 decision 层过滤依据，不参与趋势通道构造。
+**趋势质量指标**：趋势层同时输出 `short_mid_slope`、`long_mid_slope`、`channel_width_pct`、`atr_pct` 和 ATR 风控线。若 `Close_T > long_mid_{T-1}` 且 `long_mid_slope > 0`，不得直接判为普通 `RANGE`，至少应进入 `UP_WEAK` 或 `UP_PULLBACK`。
 
 **过渡衰减**：`RANGE` 不会永久黏住旧仓位。连续 `transition_decay_days`（默认 3）日处于震荡/过渡后，基础仓位衰减至 `range_target_position`。
 
@@ -235,14 +236,15 @@ min(Low[bar8], Low[bar9]) ≤ min(Low[bar6], Low[bar7])
 
 #### 第一层：趋势层（战略仓位）
 
-`trend_state`：`UP_STRONG` / `UP_PULLBACK` / `RANGE` / `DOWN_REBOUND` / `DOWN_STRONG` / `UNKNOWN`。
+`trend_state`：`UP_STRONG` / `UP_PULLBACK` / `UP_WEAK` / `RANGE` / `DOWN_REBOUND` / `DOWN_STRONG` / `UNKNOWN`。
 
 | 状态 | base | cap | floor |
 |------|------|-----|-------|
-| UP_STRONG | 10 | 10 | 6 |
-| UP_PULLBACK | 6 | 8 | 4 |
-| RANGE | 继承或衰减至 `range_target_position`（默认 4） | 4 | 0 |
-| DOWN_REBOUND | 4 | 4 | 0 |
+| UP_STRONG | 10 | 10 | 8 |
+| UP_PULLBACK | 8 | 10 | 6 |
+| UP_WEAK | 6 | 8 | 4 |
+| RANGE | 继承或衰减至 `range_target_position`（默认 4） | 6 | 0 |
+| DOWN_REBOUND | 2 | 4 | 0 |
 | DOWN_STRONG | 0 | 0 | 0 |
 | UNKNOWN | — | — | — |
 
@@ -257,6 +259,7 @@ final_target = clamp(base_target + structure_adjustment, position_floor, positio
 
 - 顶部结构：**不得**在上升趋势中反手做空至 0；仅降 cap 内目标或输出 `NO_CHASE` / `TRIM_ALLOWED`。
 - 底部结构：**不得**在 `DOWN_STRONG` 直接 BUY；可 `BOTTOM_WATCH` / `NO_PANIC_SELL`。
+- `UP_STRONG + 顶部结构` 最多 `10 -> 8`；`UP_PULLBACK + 顶部结构` 最低到 6；多头趋势下短周期顶部结构不得把最终目标压到 4 以下。
 - 顶底冲突：`structure_adjustment = 0`，`CONFLICT_WARNING`。
 - `signals.resonance` 仅展示；**不乘入**真实 `weight`。
 
@@ -267,7 +270,7 @@ final_target = clamp(base_target + structure_adjustment, position_floor, positio
 - 高九 active → `NO_CHASE`；与顶结构 + 强趋势 → `TRIM_ALLOWED`。
 - 低九 active → `NO_PANIC_SELL`；回调 + 底结构 → `PULLBACK_BUY_CANDIDATE`。
 - `is_near_historical_extreme` 仅 `probe` / 预警，不驱动 action。
-- 默认 **不**修改 `final_target_position`；可选 `sequence_execution_bias_enabled`（默认 false）。
+- 固定 **不**修改 `final_target_position`；只影响 `signal_strength` 或 `execution_rules`。
 
 #### 最终决策与 action
 
@@ -282,6 +285,17 @@ if final_target < actual  → SELL
 if equal                  → HOLD（可有纪律规则）
 if UNKNOWN / 无目标      → WAIT
 ```
+
+#### 仓位限速与 hard_exit
+
+- 默认 `normal_max_position_step = 2`。非 hard_exit 情况下，`final_target_position` 相对 `actual_position` 单日最多变化 2 档。
+- hard_exit 才允许快速降仓；若 hard_exit 触发但趋势原始目标要求加仓，则目标最多持平，不允许 BUY。
+- hard_exit 条件：
+  - `Close_T < long_lower_{T-1}`；
+  - 或 `Close_T < long_mid_{T-1}` 且 `long_mid_slope <= 0`，连续确认不少于 2 天；
+  - 或跌破 ATR 风控线。
+- 顶部结构、高九、短周期背离不属于 hard_exit。
+- 若上一交易日刚 BUY 到高目标仓位，下一交易日除非 hard_exit，否则不得直接 SELL 到 6 以下；若上一交易日刚 SELL 到低目标仓位，下一交易日不得直接 BUY 到 10，并记录 `target_reversal_warning`。
 
 次日执行原则（`principle` / `forbidden_actions` / `invalidation`）：如 BUY+`NO_CHASE` 时高开超 `max_chase_gap` 不追；SELL+`NO_PANIC_SELL` 时低开分批。
 

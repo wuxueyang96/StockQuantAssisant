@@ -132,6 +132,101 @@ def _clamp_target(
     return float(np.clip(round(raw), floor, cap))
 
 
+def _is_hard_exit(
+    trend_row: pd.Series,
+    config: StrategyConfig,
+) -> Tuple[bool, str]:
+    close = trend_row.get('Close')
+    if close is None or pd.isna(close):
+        return False, ''
+    close = float(close)
+
+    long_lower_prev = trend_row.get('long_lower_prev')
+    if pd.notna(long_lower_prev) and close < float(long_lower_prev):
+        return True, 'LONG_LOWER_BREAK'
+
+    long_mid_prev = trend_row.get('long_mid_prev')
+    long_mid_slope = trend_row.get('long_mid_slope')
+    confirm_days = trend_row.get('long_mid_bear_confirm_days', 0)
+    if (
+        pd.notna(long_mid_prev)
+        and pd.notna(long_mid_slope)
+        and close < float(long_mid_prev)
+        and float(long_mid_slope) <= 0
+        and int(confirm_days or 0) >= int(config.long_mid_break_confirm_days)
+    ):
+        return True, 'LONG_MID_BEAR_CONFIRM'
+
+    atr_stop = trend_row.get('atr_stop_line_prev')
+    if pd.notna(atr_stop) and close < float(atr_stop):
+        return True, 'ATR_STOP_BREAK'
+
+    return False, ''
+
+
+def _is_strong_breakout_confirmed(trend_row: pd.Series) -> bool:
+    if str(trend_row.get('trend_state')) != TrendState.UP_STRONG.value:
+        return False
+    close = trend_row.get('Close')
+    long_upper_prev = trend_row.get('long_upper_prev')
+    short_upper_prev = trend_row.get('short_upper_prev')
+    short_mid_slope = trend_row.get('short_mid_slope')
+    long_mid_slope = trend_row.get('long_mid_slope')
+    return (
+        pd.notna(close)
+        and pd.notna(long_upper_prev)
+        and pd.notna(short_upper_prev)
+        and float(close) > float(long_upper_prev)
+        and float(close) > float(short_upper_prev)
+        and pd.notna(short_mid_slope)
+        and pd.notna(long_mid_slope)
+        and float(short_mid_slope) > 0
+        and float(long_mid_slope) > 0
+    )
+
+
+def _limit_target_change(
+    target: float,
+    actual_position: float,
+    *,
+    hard_exit: bool,
+    config: StrategyConfig,
+) -> float:
+    step = float(config.normal_max_position_step)
+    delta = float(target) - float(actual_position)
+    if step <= 0 or abs(delta) <= step:
+        return float(target)
+    if hard_exit and delta < 0:
+        return float(target)
+    return float(actual_position) + (step if delta > 0 else -step)
+
+
+def _structure_effect_text(struct_ctx: dict, struct_adj: int, warnings: List[str]) -> str:
+    parts: List[str] = []
+    if struct_adj:
+        parts.append(f'adjustment={struct_adj:+d}')
+    strongest = struct_ctx.get('strongest_event')
+    if strongest and strongest != 'none':
+        parts.append(f'event={strongest}')
+    active = struct_ctx.get('active_periods') or []
+    if active:
+        parts.append(f'periods={",".join(active)}')
+    if warnings:
+        parts.append(f'rules={",".join(warnings)}')
+    return '; '.join(parts) if parts else 'none'
+
+
+def _sequence_effect_text(seq_ctx: SequenceContext) -> str:
+    parts: List[str] = []
+    if seq_ctx.high9_active:
+        parts.append('high9')
+    if seq_ctx.low9_active:
+        parts.append('low9')
+    if seq_ctx.execution_rules:
+        parts.append(f'rules={",".join(seq_ctx.execution_rules)}')
+    return '; '.join(parts) if parts else 'none'
+
+
 def _compute_signal_strength(
     order_weight: float,
     struct_ctx: dict,
@@ -262,6 +357,11 @@ def merge_trend_structure_sequence(
     seq_rules: List[str],
     *,
     actual_position: Optional[float],
+    previous_action: Optional[str] = None,
+    previous_final_target_position: Optional[float] = None,
+    hard_exit: Optional[bool] = None,
+    hard_exit_reason: str = '',
+    strong_breakout_confirmed: Optional[bool] = None,
     config: StrategyConfig = DEFAULT_CONFIG,
 ) -> Tuple[float, float, float, DecisionContext, SequenceContext, StructureContext]:
     """合并三层，返回 final_target, cap, floor, decision, sequence, structure。"""
@@ -273,7 +373,7 @@ def merge_trend_structure_sequence(
     seq_ctx = SequenceContext(
         high9_active=bool(trend_row.get('high9_active', False)),
         low9_active=bool(trend_row.get('low9_active', False)),
-        execution_rules=list(seq_rules),
+        execution_rules=list(seq_rules) if config.enable_execution_rules else [],
     )
 
     structure_ctx = StructureContext(
@@ -291,6 +391,7 @@ def merge_trend_structure_sequence(
         decision = DecisionContext(
             actual_position=actual_position,
             final_target_position=None,
+            raw_target_position=None,
             action='WAIT',
             confidence_label=ConfidenceLabel.WATCH.value,
             principle='数据不足或冷启动，等待趋势明确。',
@@ -298,16 +399,61 @@ def merge_trend_structure_sequence(
         )
         return np.nan, cap, floor, decision, seq_ctx, structure_ctx
 
-    final_target = _clamp_target(float(base), struct_adj, floor, cap)
+    if actual_position is None or pd.isna(actual_position):
+        prev = trend_row.get('previous_position')
+        actual_position = 0.0 if pd.isna(prev) else float(prev)
+    actual_position = float(actual_position)
+
+    if hard_exit is None:
+        hard_exit, hard_exit_reason = _is_hard_exit(trend_row, config)
+    elif hard_exit and not hard_exit_reason:
+        hard_exit_reason = 'HARD_EXIT'
+    if strong_breakout_confirmed is None:
+        strong_breakout_confirmed = _is_strong_breakout_confirmed(trend_row)
+
+    raw_target = _clamp_target(float(base), struct_adj, floor, cap)
+    final_target = raw_target
+    target_reversal_warning = ''
+
+    if hard_exit and final_target > actual_position:
+        final_target = actual_position
+
+    prev_action = str(previous_action or '').upper()
+    prev_target = previous_final_target_position
+    if (
+        prev_action == 'BUY'
+        and prev_target is not None
+        and pd.notna(prev_target)
+        and float(prev_target) >= 8.0
+        and raw_target < 6.0
+        and not hard_exit
+    ):
+        final_target = max(final_target, 6.0)
+        target_reversal_warning = 'PREV_BUY_HIGH_TARGET_BLOCK_LOW_SELL'
+
+    if (
+        prev_action == 'SELL'
+        and prev_target is not None
+        and pd.notna(prev_target)
+        and float(prev_target) <= 4.0
+        and raw_target >= 10.0
+        and not strong_breakout_confirmed
+    ):
+        final_target = min(final_target, 8.0)
+        target_reversal_warning = 'PREV_SELL_LOW_TARGET_BLOCK_FULL_BUY'
+
+    final_target = _limit_target_change(
+        final_target,
+        actual_position,
+        hard_exit=bool(hard_exit),
+        config=config,
+    )
+    final_target = float(np.clip(round(final_target), 0.0, 10.0))
 
     if config.sequence_execution_bias_enabled:
         pass  # 默认不改变 final_target
 
-    if actual_position is None or pd.isna(actual_position):
-        prev = trend_row.get('previous_position')
-        actual_position = 0.0 if pd.isna(prev) else float(prev)
-
-    order_delta = final_target - float(actual_position)
+    order_delta = final_target - actual_position
     order_weight = float(np.clip(abs(order_delta) / 10.0, 0.0, 1.0))
 
     if order_delta > 0:
@@ -321,17 +467,20 @@ def merge_trend_structure_sequence(
     conf = _confidence_label(struct_ctx, seq_ctx, struct_adj)
 
     atr_pct = trend_row.get('atr_pct')
+    effective_warnings = struct_warnings if config.enable_execution_rules else []
+    effective_seq_rules = list(seq_rules) if config.enable_execution_rules else []
     principle, forbidden, no_trade, invalidation = build_execution_guidance(
         action=action,
         trend_state=trend_state,
-        execution_rules=seq_rules + struct_warnings,
+        execution_rules=effective_seq_rules + effective_warnings,
         atr_pct=atr_pct,
         config=config,
     )
 
     decision = DecisionContext(
-        actual_position=float(actual_position),
+        actual_position=actual_position,
         final_target_position=final_target,
+        raw_target_position=raw_target,
         order_delta=order_delta,
         order_weight=round(order_weight, 6),
         action=action,
@@ -341,6 +490,11 @@ def merge_trend_structure_sequence(
         forbidden_actions=forbidden,
         no_trade_condition=no_trade,
         invalidation=invalidation,
+        hard_exit=bool(hard_exit),
+        hard_exit_reason=hard_exit_reason if hard_exit else '',
+        target_reversal_warning=target_reversal_warning,
+        structure_effect=_structure_effect_text(struct_ctx, struct_adj, struct_warnings),
+        sequence_effect=_sequence_effect_text(seq_ctx),
     )
     return final_target, cap, floor, decision, seq_ctx, structure_ctx
 
@@ -351,6 +505,8 @@ def build_daily_trading_plan(
     *,
     symbol: str = '',
     actual_position: Optional[float] = None,
+    previous_action: Optional[str] = None,
+    previous_final_target_position: Optional[float] = None,
     config: StrategyConfig = DEFAULT_CONFIG,
     trend: Optional[TrendChannel] = None,
     structure: Optional[MACDStructure] = None,
@@ -366,29 +522,43 @@ def build_daily_trading_plan(
         raise ValueError('df_daily 为空')
 
     trend_df = trend.evaluate(df_daily)
-    seq_df = sequence.evaluate(df_daily)
+    if config.enable_sequence:
+        seq_df = sequence.evaluate(df_daily)
+    else:
+        seq_df = pd.DataFrame(index=df_daily.index)
+        seq_df['high9_active'] = False
+        seq_df['low9_active'] = False
+        seq_df['high9_signal'] = False
+        seq_df['low9_signal'] = False
     last_t = trend_df.iloc[-1]
     last_s = seq_df.iloc[-1]
     as_of = pd.Timestamp(df_daily.index[-1])
     close = float(df_daily['Close'].iloc[-1])
 
-    struct_rows, _ = collect_structure_by_period(
-        intraday, structure, as_of, config,
-    )
-    struct_ctx = aggregate_structure_context(struct_rows, as_of, config)
-    struct_adj, struct_bias, struct_warnings = compute_structure_adjustment(
-        str(last_t.get('trend_state', TrendState.UNKNOWN.value)),
-        struct_ctx,
-        config,
-    )
+    if config.enable_structure:
+        struct_rows, _ = collect_structure_by_period(
+            intraday, structure, as_of, config,
+        )
+        struct_ctx = aggregate_structure_context(struct_rows, as_of, config)
+        struct_adj, struct_bias, struct_warnings = compute_structure_adjustment(
+            str(last_t.get('trend_state', TrendState.UNKNOWN.value)),
+            struct_ctx,
+            config,
+        )
+    else:
+        struct_ctx = aggregate_structure_context({}, as_of, config)
+        struct_adj, struct_bias, struct_warnings = 0, 'NEUTRAL', []
 
-    seq_rules = compute_sequence_execution_rules(
-        trend_state=str(last_t.get('trend_state', TrendState.UNKNOWN.value)),
-        high9_active=bool(last_s.get('high9_active')),
-        low9_active=bool(last_s.get('low9_active')),
-        top_structure_active=struct_ctx.get('top_active', False),
-        bottom_structure_active=struct_ctx.get('bottom_active', False),
-    )
+    if config.enable_sequence:
+        seq_rules = compute_sequence_execution_rules(
+            trend_state=str(last_t.get('trend_state', TrendState.UNKNOWN.value)),
+            high9_active=bool(last_s.get('high9_active')),
+            low9_active=bool(last_s.get('low9_active')),
+            top_structure_active=struct_ctx.get('top_active', False),
+            bottom_structure_active=struct_ctx.get('bottom_active', False),
+        )
+    else:
+        seq_rules = []
 
     near_ext = is_near_historical_extreme(df_daily)
     probe = near_ext and (
@@ -396,8 +566,8 @@ def build_daily_trading_plan(
     ) and not struct_ctx.get('top_active') and not struct_ctx.get('bottom_active')
 
     last_t = last_t.copy()
-    last_t['high9_active'] = last_s.get('high9_active')
-    last_t['low9_active'] = last_s.get('low9_active')
+    last_t['high9_active'] = bool(last_s.get('high9_active')) if config.enable_sequence else False
+    last_t['low9_active'] = bool(last_s.get('low9_active')) if config.enable_sequence else False
 
     _, _, _, decision, seq_ctx, structure_ctx = merge_trend_structure_sequence(
         last_t,
@@ -407,6 +577,8 @@ def build_daily_trading_plan(
         struct_warnings,
         seq_rules,
         actual_position=actual_position,
+        previous_action=previous_action,
+        previous_final_target_position=previous_final_target_position,
         config=config,
     )
     seq_ctx.probe = probe
@@ -555,6 +727,10 @@ def _format_signal_reason(plan: DailyTradingPlan) -> str:
         parts.append('高九活跃，执行上避免追高')
     if plan.sequence.low9_active:
         parts.append('低九活跃，执行上避免恐慌杀跌')
+    if decision.hard_exit:
+        parts.append(f'硬退出触发：{decision.hard_exit_reason}')
+    if decision.target_reversal_warning:
+        parts.append(f'反转保护：{decision.target_reversal_warning}')
     if decision.confidence_label:
         parts.append(f"置信 {decision.confidence_label}")
     if decision.principle:
@@ -580,16 +756,20 @@ def evaluate_integrated_dataframe(
 
     cols = [
         'trend_state', 'base_target_position', 'position_cap', 'position_floor',
-        'final_target_position', 'actual_position', 'order_delta', 'order_weight',
+        'final_target_position', 'raw_target_position', 'actual_position',
+        'order_delta', 'order_weight',
         'action', 'signal_strength', 'confidence_label', 'structure_adjustment',
-        'trend_reason', 'decision_reason', 'principle',
-        'high9_active', 'low9_active',
+        'sequence_adjustment', 'trend_reason', 'decision_reason', 'principle',
+        'structure_effect', 'sequence_effect', 'hard_exit_reason',
+        'target_reversal_warning', 'high9_active', 'low9_active', 'hard_exit',
     ]
     object_cols = {
         'trend_state', 'action', 'confidence_label',
         'trend_reason', 'decision_reason', 'principle',
+        'structure_effect', 'sequence_effect', 'hard_exit_reason',
+        'target_reversal_warning',
     }
-    bool_cols = {'high9_active', 'low9_active'}
+    bool_cols = {'high9_active', 'low9_active', 'hard_exit'}
     for c in cols:
         if c in object_cols:
             result[c] = None
@@ -599,6 +779,8 @@ def evaluate_integrated_dataframe(
             result[c] = np.nan
 
     carried_actual: Optional[float] = None
+    carried_action: Optional[str] = None
+    carried_final_target: Optional[float] = None
 
     for i in range(n):
         sub_daily = df_daily.iloc[: i + 1]
@@ -623,6 +805,8 @@ def evaluate_integrated_dataframe(
                 sub_daily,
                 sub_intra,
                 actual_position=carried_actual,
+                previous_action=carried_action,
+                previous_final_target_position=carried_final_target,
                 config=config,
                 trend=trend,
                 structure=structure,
@@ -638,6 +822,7 @@ def evaluate_integrated_dataframe(
         result.at[idx, 'position_cap'] = plan.trend.position_cap
         result.at[idx, 'position_floor'] = plan.trend.position_floor
         result.at[idx, 'final_target_position'] = dec.final_target_position
+        result.at[idx, 'raw_target_position'] = dec.raw_target_position
         result.at[idx, 'actual_position'] = dec.actual_position
         result.at[idx, 'order_delta'] = dec.order_delta
         result.at[idx, 'order_weight'] = dec.order_weight
@@ -645,9 +830,15 @@ def evaluate_integrated_dataframe(
         result.at[idx, 'signal_strength'] = dec.signal_strength
         result.at[idx, 'confidence_label'] = dec.confidence_label
         result.at[idx, 'structure_adjustment'] = plan.structure.adjustment
+        result.at[idx, 'sequence_adjustment'] = 0
         result.at[idx, 'trend_reason'] = plan.trend.reason
         result.at[idx, 'decision_reason'] = _format_signal_reason(plan)
         result.at[idx, 'principle'] = dec.principle
+        result.at[idx, 'structure_effect'] = dec.structure_effect
+        result.at[idx, 'sequence_effect'] = dec.sequence_effect
+        result.at[idx, 'hard_exit'] = dec.hard_exit
+        result.at[idx, 'hard_exit_reason'] = dec.hard_exit_reason
+        result.at[idx, 'target_reversal_warning'] = dec.target_reversal_warning
         result.at[idx, 'high9_active'] = plan.sequence.high9_active
         result.at[idx, 'low9_active'] = plan.sequence.low9_active
         result.at[idx, 'position'] = dec.final_target_position
@@ -655,9 +846,15 @@ def evaluate_integrated_dataframe(
 
         if dec.final_target_position is not None and not pd.isna(dec.final_target_position):
             carried_actual = float(dec.final_target_position)
+            carried_final_target = float(dec.final_target_position)
+            carried_action = dec.action
 
-    result['high9_active'] = seq_df['high9_active'].values
-    result['low9_active'] = seq_df['low9_active'].values
+    if config.enable_sequence:
+        result['high9_active'] = result['high9_active'].fillna(False)
+        result['low9_active'] = result['low9_active'].fillna(False)
+    else:
+        result['high9_active'] = False
+        result['low9_active'] = False
     for col in ('top_structure_75', 'top_structure_100', 'bottom_structure_75',
                 'bottom_structure_100', 'top_structure_active', 'bottom_structure_active'):
         if col not in result.columns:

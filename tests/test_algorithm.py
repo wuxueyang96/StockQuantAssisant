@@ -69,7 +69,7 @@ class TestTrendChannel:
         if last['trend_state'] == 'UP_STRONG':
             assert last['position'] == 10.0
         else:
-            assert last['position'] in (4.0, 6.0, 10.0)
+            assert last['position'] in (0.0, 2.0, 4.0, 6.0, 8.0, 10.0)
 
     def test_empty_position_0(self, trend):
         from app.algos.trend import TrendChannel
@@ -104,7 +104,7 @@ class TestTrendChannel:
         }, index=dates)
         result = trend.evaluate(df)
         for p in result['position'].dropna():
-            assert p in (0.0, 4.0, 6.0, 10.0)
+            assert p in (0.0, 2.0, 4.0, 6.0, 8.0, 10.0)
 
     def test_light_position_4(self, trend):
         from app.algos.trend import TrendChannel
@@ -124,7 +124,7 @@ class TestTrendChannel:
         }, index=dates)
         result = trend.evaluate(df)
         for p in result['position'].dropna():
-            assert p in (0.0, 4.0, 6.0, 10.0)
+            assert p in (0.0, 2.0, 4.0, 6.0, 8.0, 10.0)
 
     def test_position_email(self, trend):
         from app.algos.trend import TrendChannel
@@ -135,7 +135,7 @@ class TestTrendChannel:
         df['Low'] = df['Close'] * 0.97
         result = trend.evaluate(df)
         positions = result['position'].dropna()
-        assert positions.iloc[-1] in [0.0, 4.0, 6.0, 10.0]
+        assert positions.iloc[-1] in [0.0, 2.0, 4.0, 6.0, 8.0, 10.0]
 
     def test_state_persistence(self, trend):
         from app.algos.trend import TrendChannel
@@ -165,7 +165,7 @@ class TestTrendChannel:
         result = trend.evaluate(df)
         positions = result['position'].dropna()
         for p in positions:
-            assert p in (0.0, 4.0, 6.0, 10.0)
+            assert p in (0.0, 2.0, 4.0, 6.0, 8.0, 10.0)
 
     def test_next_day_thresholds(self, trend):
         df = make_ohlcv([100 + i * 0.5 for i in range(200)])

@@ -62,6 +62,7 @@ class SequenceContext:
 class DecisionContext:
     actual_position: Optional[float]
     final_target_position: Optional[float]
+    raw_target_position: Optional[float] = None
     order_delta: float = 0.0
     order_weight: float = 0.0
     action: str = 'WAIT'
@@ -71,6 +72,11 @@ class DecisionContext:
     forbidden_actions: List[str] = field(default_factory=list)
     no_trade_condition: str = ''
     invalidation: str = ''
+    hard_exit: bool = False
+    hard_exit_reason: str = ''
+    target_reversal_warning: str = ''
+    structure_effect: str = ''
+    sequence_effect: str = ''
 
 
 @dataclass
