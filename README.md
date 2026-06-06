@@ -154,7 +154,7 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 
 ### 量化决策引擎
 
-- **趋势层**：日线双通道（短周期 26 / 长周期 90，默认 3% 偏移）决定战略方向、基础目标仓位、仓位上限/下限。
+- **趋势层**：日线双通道（短周期 26 / 长周期 90，基于收盘价滚动极值）决定战略方向、基础目标仓位、仓位上限/下限；突破过滤和执行保护由 decision 层处理。
 - **结构层**：60/90/120min MACD 背离结构只做仓位边界内的修边，不反转趋势方向，不放大真实下单比例。
 - **序列层**：日线九转只输出执行纪律，如 `NO_CHASE` / `NO_PANIC_SELL`，默认不改变最终目标仓位。
 - **次日计划**：`weight = order_weight = abs(final_target - actual_position) / 10`，恒在 `[0, 1]`；`signal_strength` 仅用于展示和排序。

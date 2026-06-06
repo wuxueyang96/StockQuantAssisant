@@ -40,33 +40,30 @@ def compute_channels(df: pd.DataFrame, config: StrategyConfig = DEFAULT_CONFIG) 
     ns = config.short_period
     nl = config.long_period
 
-    upper_series = df['Close'] if config.channel_upper_source == 'close' else df['High']
-    short_rmax = upper_series.rolling(ns, min_periods=1).max()
-    short_rmin = df['Low'].rolling(ns, min_periods=1).min()
-    long_rmax = upper_series.rolling(nl, min_periods=1).max()
-    long_rmin = df['Low'].rolling(nl, min_periods=1).min()
-
-    if config.use_adaptive_offset:
-        atr = _compute_atr(df, config.atr_period)
-        offset_s = (config.adaptive_offset_k * atr / df['Close']).clip(lower=0.005, upper=0.15)
-        offset_l = offset_s
+    if config.channel_price_source == 'close':
+        upper_series = df['Close']
+        lower_series = df['Close']
+    elif config.channel_price_source == 'high_low':
+        upper_series = df['High']
+        lower_series = df['Low']
     else:
-        offset_s = config.fixed_offset
-        offset_l = config.fixed_offset
+        raise ValueError("channel_price_source must be 'close' or 'high_low'")
 
-    result['short_upper'] = short_rmax.ewm(span=ns, adjust=False).mean() * (1 + offset_s)
-    result['short_lower'] = short_rmin.ewm(span=ns, adjust=False).mean() * (1 - offset_s)
-    result['long_upper'] = long_rmax.ewm(span=nl, adjust=False).mean() * (1 + offset_l)
-    result['long_lower'] = long_rmin.ewm(span=nl, adjust=False).mean() * (1 - offset_l)
+    short_rmax = upper_series.rolling(ns, min_periods=1).max()
+    short_rmin = lower_series.rolling(ns, min_periods=1).min()
+    long_rmax = upper_series.rolling(nl, min_periods=1).max()
+    long_rmin = lower_series.rolling(nl, min_periods=1).min()
+
+    result['short_upper'] = short_rmax.ewm(span=ns, adjust=False).mean()
+    result['short_lower'] = short_rmin.ewm(span=ns, adjust=False).mean()
+    result['long_upper'] = long_rmax.ewm(span=nl, adjust=False).mean()
+    result['long_lower'] = long_rmin.ewm(span=nl, adjust=False).mean()
 
     result['short_mid'] = (result['short_upper'] + result['short_lower']) / 2
     result['long_mid'] = (result['long_upper'] + result['long_lower']) / 2
 
-    if config.use_adaptive_offset:
-        result['atr_pct'] = (atr / df['Close']).replace([np.inf, -np.inf], np.nan)
-    else:
-        atr = _compute_atr(df, config.atr_period)
-        result['atr_pct'] = (atr / df['Close']).replace([np.inf, -np.inf], np.nan)
+    atr = _compute_atr(df, config.atr_period)
+    result['atr_pct'] = (atr / df['Close']).replace([np.inf, -np.inf], np.nan)
 
     return result
 
@@ -222,22 +219,19 @@ def compute_trend_decision(
 
 
 class TrendChannel:
-    """向后兼容封装：默认参数与旧版 TrendChannel 一致。"""
+    """Trend channel helper."""
 
     def __init__(
         self,
         short_period: int = 26,
         long_period: int = 90,
-        offset_pct: float = 0.03,
         config: Optional[StrategyConfig] = None,
     ):
         self.short_period = short_period
         self.long_period = long_period
-        self.offset_pct = offset_pct
         self.config = config or StrategyConfig(
             short_period=short_period,
             long_period=long_period,
-            fixed_offset=offset_pct,
         )
 
     def compute_all(self, df: pd.DataFrame) -> pd.DataFrame:

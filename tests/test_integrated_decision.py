@@ -145,7 +145,7 @@ class TestIntegratedDecision:
             'Volume': [1e6] * n,
         }, index=dates)
         cfg = StrategyConfig(
-            short_period=5, long_period=10, fixed_offset=0.03,
+            short_period=5, long_period=10,
             transition_decay_days=3, range_target_position=4.0,
         )
         ev = compute_trend_decision(df, cfg)

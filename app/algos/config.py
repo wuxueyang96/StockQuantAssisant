@@ -67,11 +67,8 @@ POSITION_LABEL: Dict[float, str] = {
 class StrategyConfig:
     short_period: int = 26
     long_period: int = 90
-    fixed_offset: float = 0.03
-    use_adaptive_offset: bool = False
     atr_period: int = 14
-    channel_upper_source: str = 'close'
-    adaptive_offset_k: float = 0.5
+    channel_price_source: str = 'close'
     transition_decay_days: int = 3
     range_target_position: float = 4.0
     max_structure_adjustment: int = 2

@@ -146,7 +146,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 #### chart_data_service.py
 
 - `build_chart_data` — 输出浏览器绘图用 JSON。
-- 日线：K 线、趋势四轨、MACD、九转序列、逐日决策点。
+- 日线：K 线、短/长期趋势通道边界、MACD、九转序列、逐日决策点。
 - 60/90/120min：K 线、MACD、结构 75/100 信号和 active 状态。
 
 #### backtest_service.py
@@ -161,13 +161,13 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 #### config.py — 策略配置与枚举
 
-`StrategyConfig` 集中管理趋势通道、ATR、自适应 offset、过渡衰减、结构有效期、90min partial-bar 交易过滤、次日高开/低开执行保护等配置。`TrendState` / `StructureBias` / `Action` / `ConfidenceLabel` 用 enum 表达核心状态，减少魔法字符串。
+`StrategyConfig` 集中管理趋势通道、ATR 质量指标、过渡衰减、结构有效期、90min partial-bar 交易过滤、次日高开/低开执行保护等配置。`TrendState` / `StructureBias` / `Action` / `ConfidenceLabel` 用 enum 表达核心状态，减少魔法字符串。
 
 #### trend.py — 趋势量化
 
-`TrendChannel(short_period=26, long_period=90, offset_pct=0.03)`
+`TrendChannel(short_period=26, long_period=90)`
 
-通道公式：`EMA(RollingMax(Close, N), N) × (1+offset)` / `EMA(RollingMin(Low, N), N) × (1−offset)`。默认上轨使用 Close，`channel_upper_source='high'` 时可切回 High。
+通道公式：`EMA(RollingMax(Close, N), N)` / `EMA(RollingMin(Close, N), N)`。短期和长期是两个独立通道，每个通道各有上/下边界。默认使用收盘价极值；`channel_price_source='high_low'` 时可切回旧的 High/Low 极值口径。趋势层不内置 offset；突破后的缓冲、确认和执行过滤由 decision 层处理。
 
 趋势状态：`UP_STRONG` / `UP_PULLBACK` / `RANGE` / `DOWN_REBOUND` / `DOWN_STRONG` / `UNKNOWN`。趋势层输出 `base_target_position`、`position_cap`、`position_floor`、`trend_reason` 和质量指标。突破判定使用 T 日收盘价对比 T-1 已确定轨线，避免未来函数。
 
@@ -206,7 +206,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 核心规则：`final_target = clamp(base_target + structure_adjustment, floor, cap)`；`action` 由 `actual_position` 与 `final_target` 的差值推导。`weight = order_weight = |final_target - actual_position| / 10`，结构/序列不得乘大真实下单比例；`signal_strength` 仅用于展示和排序。
 
-`summary_integrated(df_daily, intraday)` 返回：`decision`（action/weight/confidence/execute_at）、`signals`（structure/sequence/resonance）、`standards`（trend 四轨 + structure 阈值）、`view`（人话态势 + 触发价位）。
+`summary_integrated(df_daily, intraday)` 返回：`decision`（action/weight/confidence/execute_at）、`signals`（structure/sequence/resonance）、`standards`（趋势通道边界 + structure 阈值）、`view`（人话态势 + 触发价位）。
 
 ### 3.4.1 Schema 层 — app/schemas/decision.py
 
@@ -298,7 +298,7 @@ POST /api/stock/decision {"stock": "阿里巴巴", "interval": "daily"}
 | DIF 带符号相对阈值比较 | 统一顶/底背离判定，解决负 DIF 和 |DIF|<1 的语义反转 |
 | 结构状态机 100% 后立即 reset | 避免单股生命周期只产一次信号 |
 | 钝化区间 DIF 极值逐根更新 | 修复 DIF 在两峰之间漏检 |
-| 趋势通道默认 EMA(RollingMax(Close,N), N) | 避免单根极端影线虚胖上轨；可通过 `channel_upper_source='high'` 切回 High |
+| 趋势通道默认使用 Close 极值 | 上下边界口径一致，避免 High/Low 影线扭曲趋势通道；可通过 `channel_price_source='high_low'` 切回旧口径 |
 | 趋势定仓、结构修边、序列纪律 | 避免结构/序列反客为主；真实 `weight` 只来自仓位差，`signal_strength` 仅展示 |
 | cap/floor 边界内修边 | 结构不能反转趋势方向，避免仓位 4/6 附近的多空逻辑冲突 |
 | 信号 T+1 计划执行 | 趋势用 T 日收盘判定，下一工作日执行，避免未来函数 |

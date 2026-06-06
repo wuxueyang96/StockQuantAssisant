@@ -24,7 +24,7 @@ class TestTrendChannel:
     @pytest.fixture
     def trend(self):
         from app.algos.trend import TrendChannel
-        return TrendChannel(short_period=26, long_period=90, offset_pct=0.03)
+        return TrendChannel(short_period=26, long_period=90)
 
     def test_channels_basic_shape(self, trend):
         df = make_ohlcv([100 + i * 0.5 for i in range(200)])
@@ -53,8 +53,10 @@ class TestTrendChannel:
         valid = channels.dropna()
         short_width = valid['short_upper'] - valid['short_lower']
         long_width = valid['long_upper'] - valid['long_lower']
-        assert (short_width > 0).all()
-        assert (long_width > 0).all()
+        assert (short_width >= 0).all()
+        assert (long_width >= 0).all()
+        assert (short_width > 0).any()
+        assert (long_width > 0).any()
 
     def test_full_position_10(self, trend):
         """强上升：收盘须突破 T-1 短/长上轨（无未来函数）。"""
@@ -71,7 +73,7 @@ class TestTrendChannel:
 
     def test_empty_position_0(self, trend):
         from app.algos.trend import TrendChannel
-        trend = TrendChannel(short_period=10, long_period=30, offset_pct=0.0)
+        trend = TrendChannel(short_period=10, long_period=30)
         prices = [200] * 50 + list(range(200, 50, -1))
         closes = [float(p) for p in prices]
         highs = [c * 1.05 for c in closes]
@@ -88,7 +90,7 @@ class TestTrendChannel:
 
     def test_heavy_position_6(self, trend):
         from app.algos.trend import TrendChannel
-        trend = TrendChannel(short_period=5, long_period=15, offset_pct=0.0)
+        trend = TrendChannel(short_period=5, long_period=15)
         n = 50
         closes = np.linspace(100, 150, 30).tolist() + [148, 145, 140, 135, 130, 128, 126, 124, 122, 120,
                                                           118, 116, 114, 112, 110, 108, 106, 104, 102, 100]
@@ -106,7 +108,7 @@ class TestTrendChannel:
 
     def test_light_position_4(self, trend):
         from app.algos.trend import TrendChannel
-        trend = TrendChannel(short_period=5, long_period=15, offset_pct=0.0)
+        trend = TrendChannel(short_period=5, long_period=15)
         n = 50
         closes = [100] * 15 + [102, 105, 108, 110, 112, 115, 118, 120, 122, 125,
                                 128, 130, 132, 135, 138, 140, 142, 145, 148, 150]
@@ -126,7 +128,7 @@ class TestTrendChannel:
 
     def test_position_email(self, trend):
         from app.algos.trend import TrendChannel
-        trend = TrendChannel(short_period=10, long_period=30, offset_pct=0.0)
+        trend = TrendChannel(short_period=10, long_period=30)
         prices = [100] * 50 + [102, 104, 106, 108, 110, 112, 114, 116]
         df = make_ohlcv(prices, low_offset=0.01)
         df['High'] = df['Close'] * 1.05
@@ -137,7 +139,7 @@ class TestTrendChannel:
 
     def test_state_persistence(self, trend):
         from app.algos.trend import TrendChannel
-        trend = TrendChannel(short_period=10, long_period=30, offset_pct=0.0)
+        trend = TrendChannel(short_period=10, long_period=30)
         prices = [100] * 50
         df = make_ohlcv(prices, high_offset=0.02, low_offset=0.02)
         df['High'] = df['Close'] * 1.03
@@ -154,10 +156,9 @@ class TestTrendChannel:
 
     def test_custom_params(self):
         from app.algos.trend import TrendChannel
-        t = TrendChannel(short_period=20, long_period=60, offset_pct=0.02)
+        t = TrendChannel(short_period=20, long_period=60)
         assert t.short_period == 20
         assert t.long_period == 60
-        assert t.offset_pct == 0.02
 
     def test_position_int_values(self, trend):
         df = make_ohlcv([100 + i * 0.5 for i in range(200)])
@@ -194,22 +195,22 @@ class TestTrendChannel:
 
         N = trend.short_period
         rolling_max = df['Close'].rolling(N, min_periods=1).max()
-        expected = rolling_max.ewm(span=N, adjust=False).mean() * (1 + trend.offset_pct)
+        expected = rolling_max.ewm(span=N, adjust=False).mean()
 
         result = trend.compute_all(df)
         np.testing.assert_array_almost_equal(
             result['short_upper'].values[-50:], expected.values[-50:], decimal=4
         )
-        high_based = df['High'].rolling(N, min_periods=1).max().ewm(span=N, adjust=False).mean() * (1 + trend.offset_pct)
+        high_based = df['High'].rolling(N, min_periods=1).max().ewm(span=N, adjust=False).mean()
         assert not np.allclose(result['short_upper'].values[-50:], high_based.values[-50:])
 
-    def test_short_lower_uses_ema_of_rolling_min_low(self, trend):
+    def test_short_lower_uses_ema_of_rolling_min_close(self, trend):
         np.random.seed(7)
         n = 200
         closes = np.full(n, 100.0)
-        lows = closes.copy()
         for i in range(0, n, 5):
-            lows[i] = 90.0
+            closes[i] = 90.0
+        lows = closes - 2.0
         highs = closes + 1.0
         opens = closes.copy()
         df = pd.DataFrame({
@@ -218,23 +219,26 @@ class TestTrendChannel:
         }, index=pd.date_range('2024-01-01', periods=n, freq='B'))
 
         N = trend.short_period
-        rolling_min = df['Low'].rolling(N, min_periods=1).min()
-        expected = rolling_min.ewm(span=N, adjust=False).mean() * (1 - trend.offset_pct)
+        rolling_min = df['Close'].rolling(N, min_periods=1).min()
+        expected = rolling_min.ewm(span=N, adjust=False).mean()
 
         result = trend.compute_all(df)
         np.testing.assert_array_almost_equal(
             result['short_lower'].values[-50:], expected.values[-50:], decimal=4
         )
+        low_based = df['Low'].rolling(N, min_periods=1).min().ewm(span=N, adjust=False).mean()
+        assert not np.allclose(result['short_lower'].values[-50:], low_based.values[-50:])
 
     def test_long_channel_uses_rolling_extrema(self, trend):
         np.random.seed(7)
         n = 250
         closes = np.full(n, 100.0)
-        highs = closes.copy()
-        lows = closes.copy()
         for i in range(0, n, 7):
-            highs[i] = 115.0
-            lows[i] = 92.0
+            closes[i] = 115.0
+        for i in range(3, n, 11):
+            closes[i] = 92.0
+        highs = closes + 2.0
+        lows = closes - 2.0
         opens = closes.copy()
         df = pd.DataFrame({
             'Open': opens, 'High': highs, 'Low': lows, 'Close': closes,
@@ -242,12 +246,36 @@ class TestTrendChannel:
         }, index=pd.date_range('2024-01-01', periods=n, freq='B'))
 
         N = trend.long_period
-        exp_upper = df['Close'].rolling(N, min_periods=1).max().ewm(span=N, adjust=False).mean() * (1 + trend.offset_pct)
-        exp_lower = df['Low'].rolling(N, min_periods=1).min().ewm(span=N, adjust=False).mean() * (1 - trend.offset_pct)
+        exp_upper = df['Close'].rolling(N, min_periods=1).max().ewm(span=N, adjust=False).mean()
+        exp_lower = df['Close'].rolling(N, min_periods=1).min().ewm(span=N, adjust=False).mean()
 
         result = trend.compute_all(df)
         np.testing.assert_array_almost_equal(result['long_upper'].values[-50:], exp_upper.values[-50:], decimal=4)
         np.testing.assert_array_almost_equal(result['long_lower'].values[-50:], exp_lower.values[-50:], decimal=4)
+
+    def test_channel_can_use_legacy_high_low_source(self):
+        from app.algos.trend import TrendChannel
+
+        n = 80
+        closes = np.full(n, 100.0)
+        df = pd.DataFrame({
+            'Open': closes,
+            'High': closes + 5.0,
+            'Low': closes - 5.0,
+            'Close': closes,
+            'Volume': [1_000_000] * n,
+        }, index=pd.date_range('2024-01-01', periods=n, freq='B'))
+        from app.algos.config import StrategyConfig
+        trend = TrendChannel(config=StrategyConfig(
+            short_period=10,
+            long_period=30,
+            channel_price_source='high_low',
+        ))
+
+        result = trend.compute_all(df)
+
+        assert result['short_upper'].iloc[-1] == pytest.approx(105.0)
+        assert result['short_lower'].iloc[-1] == pytest.approx(95.0)
 
 
 class TestMACDCalculation:

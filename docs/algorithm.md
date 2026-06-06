@@ -9,22 +9,22 @@
 设短期周期 `N_s = 26`，长期周期 `N_l = 90`。
 
 **短期通道**
-*   上轨：`EMA( RollingMax(Close, N_s), N_s ) × (1 + offset)`（默认；`channel_upper_source='high'` 时可切回 High）
-*   下轨：`EMA( RollingMin(Low,  N_s), N_s ) × (1 − offset)`
+*   上边界：`EMA( RollingMax(Close, N_s), N_s )`
+*   下边界：`EMA( RollingMin(Close, N_s), N_s )`
 
 **长期通道**
-*   上轨：`EMA( RollingMax(Close, N_l), N_l ) × (1 + offset)`（默认；`channel_upper_source='high'` 时可切回 High）
-*   下轨：`EMA( RollingMin(Low,  N_l), N_l ) × (1 − offset)`
+*   上边界：`EMA( RollingMax(Close, N_l), N_l )`
+*   下边界：`EMA( RollingMin(Close, N_l), N_l )`
 
-> **公式语义**：先用滚动窗口取过去 N 根 K 线的收盘高点序列 / 最低价序列，再对极值序列做 EMA 平滑。默认用 Close 构建上轨，避免单根极端影线把通道虚胖；下轨仍使用 Low 捕捉真实下沿。若直接对 Close / Low 求 EMA，会退化成两条普通均线，丧失通道的支撑 / 阻力语义。
+> **公式语义**：短期和长期是两个独立通道，不是"短上/短下/长上/长下四个通道"。每个通道的上下边界都基于收盘价极值序列：上边界追踪最近 N 根 K 线的收盘高点中枢，下边界追踪最近 N 根 K 线的收盘低点中枢。这样趋势突破、破位和实际收盘价口径一致，避免 High/Low 影线把通道边界虚胖或虚矮。若直接对 Close 求 EMA，会退化成普通均线，丧失通道支撑 / 阻力语义。
 
-**偏移 `offset`**：默认 `0.03`。**推荐采用自适应版本**：`offset = k × ATR(N) / Close`（k 默认 0.5），跨市场跨标的更稳定；如需固定值，允许配置常数。
+趋势层不再定义 offset。趋势线只表达当前按收盘价计算出来的短期 / 长期通道边界；突破之后是否需要缓冲、过滤、确认或延迟执行，统一交给 decision 层处理。
 
-**设计依据**：徐小明"多空通道"指标。短期通道基于近 26 周期收盘高点 / 最低点的 EMA，长期基于近 90 周期收盘高点 / 最低点的 EMA。"分久必合，合久必分"，双通道的收敛与发散反映趋势强弱切换。
+**设计依据**：徐小明"多空通道"指标。短期通道基于近 26 周期收盘高点 / 收盘低点的 EMA，长期通道基于近 90 周期收盘高点 / 收盘低点的 EMA。"分久必合，合久必分"，双通道的收敛与发散反映趋势强弱切换。
 
 #### 2. 趋势判断与仓位量化
 
-每个交易日**收盘后**，用 T 日收盘价 `Close_T` 与 **T-1 已经确定的四条轨线**比较。禁止用 T 日 High/Low 参与生成的 `channel_T` 来判断 T 日是否突破自身通道；`channel_T` 只作为状态更新和 T+1 参考线。
+每个交易日**收盘后**，用 T 日收盘价 `Close_T` 与 **T-1 已经确定的短期/长期通道边界**比较。禁止用 T 日生成的 `channel_T` 来判断 T 日是否突破自身通道；`channel_T` 只作为状态更新和 T+1 参考线。
 
 | trend_state | 条件（均使用 T-1 轨线） | base | cap | floor | 含义 |
 |-------------|--------------------------|------|-----|-------|------|
@@ -37,9 +37,9 @@
 
 **冷启动**：首次有效仓位形成之前，`position = NaN`，不产生 BS 点。
 
-**突破有效性**：轨线已含 offset 缓冲，因此默认仅要求收盘价跨越轨线即可视为有效突破，不再额外要求"连续 N 日"。
+**突破有效性**：趋势层只判断收盘价是否跨越 T-1 已确定轨线。额外的突破缓冲、ATR 过滤、连续确认或执行保护不写入趋势线本身，应由 decision 层在生成最终动作时处理。
 
-**趋势质量指标**：趋势层同时输出 `short_mid_slope`、`long_mid_slope`、`channel_width_pct`、`atr_pct`。配置项预留自适应 offset：`offset = adaptive_offset_k × ATR(N) / Close`，默认仍使用固定 `fixed_offset = 0.03`。
+**趋势质量指标**：趋势层同时输出 `short_mid_slope`、`long_mid_slope`、`channel_width_pct`、`atr_pct`。其中 `atr_pct` 作为质量指标和 decision 层过滤依据，不参与趋势通道构造。
 
 **过渡衰减**：`RANGE` 不会永久黏住旧仓位。连续 `transition_decay_days`（默认 3）日处于震荡/过渡后，基础仓位衰减至 `range_target_position`。
 
@@ -224,7 +224,7 @@ min(Low[bar8], Low[bar9]) ≤ min(Low[bar6], Low[bar7])
 
 **执行语义**：T 日收盘后生成一次决策，T+1 可执行时点下单；遇到周末时顺延至下一工作日的可执行时段。**不做高频、不用未来函数**。
 
-**突破判定（趋势）**：T 日 `Close` 仅与 **T-1 已确定轨线**比较；当日 `High/Low` 抬高的 `channel_T` 不参与 T 日突破判定。
+**突破判定（趋势）**：T 日 `Close` 仅与 **T-1 已确定通道边界**比较；T 日生成的 `channel_T` 不参与 T 日突破判定。
 
 **API / 周期分工**
 

@@ -40,9 +40,9 @@ class TestTrendNoLookahead:
             prev['long_lower'],
         )
         assert state.value != 'UP_STRONG'
-        assert close < float(prev['short_upper'])
+        assert close <= float(prev['short_upper'])
 
-        ev = TrendChannel(short_period=26, long_period=90, offset_pct=0.03).evaluate(df)
+        ev = TrendChannel(short_period=26, long_period=90).evaluate(df)
         assert ev.iloc[-1]['trend_state'] != 'UP_STRONG'
 
     def test_up_strong_when_close_above_prev_both_uppers(self):
@@ -53,7 +53,7 @@ class TestTrendNoLookahead:
             'Open': closes, 'High': closes * 1.02, 'Low': closes * 0.98,
             'Close': closes, 'Volume': [1e6] * n,
         }, index=dates)
-        ev = TrendChannel(short_period=26, long_period=90, offset_pct=0.03).evaluate(df)
+        ev = TrendChannel(short_period=26, long_period=90).evaluate(df)
         last = ev.iloc[-1]
         if last['trend_state'] == 'UP_STRONG':
             assert last['base_target_position'] == 10.0
