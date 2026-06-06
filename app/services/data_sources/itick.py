@@ -54,8 +54,6 @@ def target_rows(market: str, history_days: int = None, start_date=None, end_date
 
 def apply_free_rate_limit():
     global _next_request_at
-    if not Config.ITICK_FREE_MODE:
-        return
     min_interval = max(0.0, float(Config.ITICK_FREE_MIN_INTERVAL_SECONDS))
     if min_interval <= 0:
         return
@@ -107,7 +105,7 @@ class ITickDataSource(MarketDataSource):
 
     @property
     def free_mode(self) -> bool:
-        return bool(Config.ITICK_FREE_MODE)
+        return True
 
     @property
     def refresh_limit(self) -> int:
@@ -129,18 +127,15 @@ class ITickDataSource(MarketDataSource):
                 rows = max(bars_per_day, int(trading_days or 1) * bars_per_day)
             request_count = max(1, math.ceil(int(rows) / page_limit))
         free_interval = max(0.0, float(Config.ITICK_FREE_MIN_INTERVAL_SECONDS))
-        estimated_seconds = (
-            max(0, int(request_count) - 1) * free_interval
-            if Config.ITICK_FREE_MODE else 0.0
-        )
+        estimated_seconds = max(0, int(request_count) - 1) * free_interval
         return {
             'data_source': self.name,
-            'free_mode': bool(Config.ITICK_FREE_MODE),
+            'free_mode': True,
             'market': market,
             'bars_per_trading_day': bars_per_day,
             'page_limit': page_limit,
             'request_count': int(request_count),
-            'min_interval_seconds': free_interval if Config.ITICK_FREE_MODE else 0.0,
+            'min_interval_seconds': free_interval,
             'estimated_seconds': estimated_seconds,
         }
 
@@ -256,10 +251,6 @@ class ITickDataSource(MarketDataSource):
             if min_time <= start or len(all_items) >= rows:
                 break
             et = min_ts - 1
-            delay_seconds = float(Config.ITICK_PAGE_DELAY_SECONDS)
-            if delay_seconds > 0 and not Config.ITICK_FREE_MODE:
-                time.sleep(delay_seconds)
-
         df = normalize_kline(all_items, request.market)
         if df.empty:
             logger.warning(f"iTick 返回空数据: {region}/{code}")

@@ -9,7 +9,7 @@
 | 存储路径 | 用途 | 文件数 |
 |----------|------|--------|
 | `metadata/stock_codes.parquet` | 股票名称映射 | 1 |
-| `metadata/workflows.parquet` | 5min 工作流持久化 | 1 |
+| `metadata/registered_stocks.parquet` | 5min 注册记录持久化 | 1 |
 | `{market}/{table_name}.parquet` | 5min OHLCV 行情数据 | N（每个市场/股票 1 个） |
 
 完整目录结构：
@@ -18,7 +18,7 @@
 s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地模式)
 ├── metadata/
 │   ├── stock_codes.parquet
-│   └── workflows.parquet
+│   └── registered_stocks.parquet
 ├── a/
 │   ├── A_000001.SZ_5min.parquet
 │   ├── A_600519.SS_5min.parquet
@@ -42,18 +42,17 @@ s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地�
 | `hk_code` | string/nullable | 港股代码，4-5 位数字，如 `09988` |
 | `us_code` | string/nullable | 美股代码，如 `BABA` |
 
-## 2. metadata/workflows.parquet — 工作流持久化
+## 2. metadata/registered_stocks.parquet — 注册记录持久化
 
-存储所有已注册的数据采集工作流。服务重启时自动加载恢复。
+存储所有已注册股票。服务重启时自动加载恢复。旧版本生成的 `metadata/workflows.parquet` 会在启动时作为迁移来源读取一次，当前版本不再写入该文件。
 
 | 列名 | 类型 | 说明 |
 |------|------|------|
-| `id` | string | 工作流唯一标识，格式 `{MARKET}_{CODE}_5min` |
+| `id` | string | 注册记录唯一标识，格式 `{MARKET}_{CODE}_5min` |
 | `market` | string | 市场代码：`a` / `hk` / `us` |
 | `stock_code` | string | 内部股票代码，无后缀，如 `09988` |
 | `interval` | string | 当前固定为 `5min` |
 | `table` | string | 对应 Parquet 文件名（不含扩展名），值与 `id` 相同 |
-| `db_path` | string | 保留字段，当前为空字符串 |
 | `created_at` | string | 创建时间（ISO 8601） |
 | `active` | int/bool | 是否活跃 |
 
@@ -74,7 +73,7 @@ s3://{bucket}/                         (OSS 模式)  或  {DATA_DIR}/  (本地�
 
 文件示例：
 
-| 文件路径 | 对应工作流 |
+| 文件路径 | 对应注册记录 |
 |----------|-----------|
 | `a/A_000001.SZ_5min.parquet` | A 股 000001 5min |
 | `a/A_600519.SS_5min.parquet` | A 股 600519 5min |

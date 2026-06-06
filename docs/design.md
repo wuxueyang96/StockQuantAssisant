@@ -2,19 +2,19 @@
 
 ## 1. 概述
 
-StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化分析、前端控制台与任务调度系统，支持 A 股 / 港股 / 美股。数据以 **Parquet 列存格式** 存储在 **云对象存储 (S3 / OSS)** 上，通过 DuckDB 的 httpfs 扩展远程读写，实现 **存算分离** 和无状态部署。
+StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化分析、前端控制台与回测系统，支持 A 股 / 港股 / 美股。数据以 **Parquet 列存格式** 存储在 **云对象存储 (S3 / OSS)** 上，通过 DuckDB 的 httpfs 扩展远程读写，实现 **存算分离** 和无状态部署。
 
 量化决策采用「趋势为王、结构修边、序列纪律」的日频三层状态机。系统每天收盘后生成一次次日交易计划，真实下单比例只来自目标仓位与当前仓位的差值。
 
 ## 2. 架构总览
 
 ```
-┌──────────┐       ┌─────────────┐
-│  run.py  │       │  调度层       │
-│  Flask   │◄──────│  APScheduler │
-└────┬─────┘       └──────┬──────┘
-     │                    │
-┌────▼────────────────────▼──────────┐
+┌──────────┐
+│  run.py  │
+│  Flask   │
+└────┬─────┘
+     │
+┌────▼───────────────────────────────┐
 │        Web / API 层                 │
 │  templates/index.html + static      │
 │  api/routes.py                      │
@@ -22,7 +22,7 @@ StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化
      │
 ┌────▼────────────────────▼──────────┐
 │           Service 层                │
-│  workflow_service / stock_service   │
+│ registration_service / stock_service│
 │ analysis / chart_data / backtest svc│
 │  resample                          │
 └────┬───────────────┬───────────────┘
@@ -47,11 +47,10 @@ StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化
 |--------|------|
 | `DATA_DIR` | 数据目录（默认 `~/.stockquant/data/`）；本地模式下 Parquet 存于此；OSS 模式下存于 S3 |
 | `INTERVAL_MAP` | 采集层周期 → (period, interval) 映射；**仅包含 `5min`** |
-| `INTERVAL_MINUTES` | 周期 → 分钟数（供 resample 和 scheduler 使用） |
-| `RESAMPLE_INTERVALS` | 运行时合成支持的目标周期（供文档/调度引用） |
-| `DATA_SOURCE` / `ITICK_TOKEN` / `ITICK_BASE_URL` | 主数据源选择与 iTick 配置；token 通过环境变量注入 |
-| `ITICK_FREE_MODE` / `ITICK_FREE_MIN_INTERVAL_SECONDS` | iTick 免费模式和全局 REST 限速配置 |
-| `STOCKQUANT_AUTO_COLLECT` | 是否启用后台定时采集；免费模式默认关闭 |
+| `INTERVAL_MINUTES` | 周期 → 分钟数（供 resample 使用） |
+| `RESAMPLE_INTERVALS` | 运行时合成支持的目标周期 |
+| `DATA_SOURCE` / `ITICK_TOKEN` / `ITICK_BASE_URL` | 主数据源选择；默认 AkShare，iTick token 通过环境变量注入 |
+| `ITICK_FREE_MIN_INTERVAL_SECONDS` / `ITICK_FREE_REFRESH_LIMIT` | iTick 固定免费额度限速与单页刷新配置 |
 | `YFINANCE_TICKER_MAP` | 市场 → yfinance ticker 转换函数（兜底用） |
 | `TRADING_HOURS` | 各市场交易时段和时区 |
 | OSS 配置 | `OSS_BUCKET` / `OSS_ENDPOINT` / `OSS_REGION` / `OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` |
@@ -64,7 +63,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 |------|------|------|
 | `/stock/code` | POST | 录入/更新股票名称→代码映射 |
 | `/stock/codes` | GET | 查看所有映射 |
-| `/stock/register` | POST | 注册股票数据工作流 |
+| `/stock/register` | POST | 注册股票 |
 | `/stock/data-status` | GET | 查询本地数据状态 |
 | `/stock/refresh` | POST | 主动刷新最新数据 |
 | `/refresh` | POST | 强制刷新所有已录入且已注册股票 |
@@ -74,16 +73,16 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 | `/stock/decision` | POST | 查询量化决策结果 |
 | `/stock/chart-data` | GET | 返回 WebUI 绘图 JSON |
 | `/stock/backtest` | POST | 回测整合决策 |
-| `/stock/<code>/workflows` | GET | 查询指定股票工作流 |
-| `/workflows` | GET | 查看所有工作流 |
-| `/workflows/<id>` | DELETE | 删除工作流 |
+| `/stock/<code>/registrations` | GET | 查询指定股票注册记录 |
+| `/registered-stocks` | GET | 查看所有已注册股票 |
+| `/registered-stocks/<id>` | DELETE | 删除注册记录 |
 | `/health` | GET | 健康检查 |
 
 ### 3.2.1 前端控制台 — templates / static
 
 - `app/templates/index.html`：单页控制台入口，访问 `/`。
 - `app/static/css/app.css`：页面布局与视觉样式。
-- `app/static/js/app.js`：直接调用现有 API，支持标的分析、注册工作流、查看三层次日计划、TradingView Lightweight Charts 行情图、回测和原始 JSON。
+- `app/static/js/app.js`：直接调用现有 API，支持标的分析、注册股票、查看三层次日计划、TradingView Lightweight Charts 行情图、回测和原始 JSON。BUY/SELL 信号支持 hover 查看当日决策原因。
 - 前端不引入 Node/Vite/Webpack 等构建链，部署方式与原 Flask 服务一致。
 
 ### 3.3 Service 层
@@ -109,20 +108,21 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 | 数据源 | 文件 | 覆盖市场 | 说明 |
 |--------|------|----------|------|
-| iTick | `itick.py` | A / HK / US | 主数据源；支持分页、free mode 限速和请求预算 |
-| akshare | `akshare_source.py` | A / HK | A 股 / 港股兜底 |
+| akshare | `akshare_source.py` | A / HK | 默认主数据源；适合免费拉取 A 股 / 港股 5min 研究数据 |
+| iTick | `itick.py` | A / HK / US | 可选源；支持分页、固定免费额度限速和请求预算 |
 | yfinance | `yfinance_source.py` | A / HK / US | 最后兜底；5min 历史窗口受 Yahoo 限制 |
 
-**数据源策略**：业务层只依赖 `MarketDataSource` 接口，所有源都输出标准 5min OHLCV。60min / 90min / 120min / daily 由 `resample` 运行时合成。未配置 iTick token 或 iTick 请求失败时，注册表会按市场自动回退 akshare / yfinance。
+**数据源策略**：业务层只依赖 `MarketDataSource` 接口，所有源都输出标准 5min OHLCV。60min / 90min / 120min / daily 由 `resample` 运行时合成。默认顺序为 akshare → yfinance；显式设置 `STOCKQUANT_DATA_SOURCE=itick` 时才使用 iTick，并在 token 缺失或请求失败时回退 akshare / yfinance。
 
-#### workflow_service.py
+#### registration_service.py
 
-`WorkflowService` 单例，采集层只保留 5min 工作流：
+`RegistrationService` 单例，采集层只保留 5min 注册记录：
 
-- `register_stock(input)` → `detect_market` → 为每个市场创建 1 个 5min 工作流
-- `get_stock_workflows / get_all_workflows` → 查询
-- `delete_workflow(wf_id)` → 从内存和 DB 中删除
-- 工作流信息持久化到 `metadata/workflows.parquet`，启动时自动加载恢复
+- `register_stock(input)` → `detect_market` → 为每个市场创建 1 个 5min 注册记录
+- `get_stock_registrations / get_all_registered_stocks` → 查询
+- `delete_registration(registration_id)` → 从内存和 DB 中删除
+- 注册信息持久化到 `metadata/registered_stocks.parquet`，启动时自动加载恢复
+- 注册不会自动请求外部数据源；数据只通过刷新/补历史接口维护
 
 #### analysis_service.py
 
@@ -136,7 +136,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 - `get_data_status` — 返回本地 5min 数据行数、起止时间、日线数量和注册状态。
 - `refresh_data` — 面向已注册股票，拉取最近小窗口并通过 `insert_data` 增量写入。
-- `refresh_all_registered` — 强制刷新所有已录入代码映射且已注册 5min 工作流的股票。
+- `refresh_all_registered` — 强制刷新所有已录入代码映射且已注册的股票。
 - `backfill_data` — 面向已注册股票，拉取指定历史窗口并通过 `upsert_data` 合并补齐旧数据。
 
 #### resample.py
@@ -217,14 +217,10 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 `DatabaseManager` 基于 DuckDB 内存引擎 + httpfs 扩展，实现 Parquet on OSS 存算分离：
 
 - **OHLCV 数据**：每个 stock/market 一个 Parquet 文件，路径 `{market}/{table_name}.parquet`
-- **元数据**（stock_codes / workflows）：存储于 `metadata/` 目录下 Parquet 文件，启动时加载到 DuckDB 内存表，写操作实时刷新
-- 方法：`table_exists` / `insert_data` / `get_data` / `upsert_stock_code` / `save_workflow` / `load_workflows` 等
+- **元数据**（stock_codes / registered_stocks）：存储于 `metadata/` 目录下 Parquet 文件，启动时加载到 DuckDB 内存表，写操作实时刷新
+- 方法：`table_exists` / `insert_data` / `get_data` / `upsert_stock_code` / `save_registration` / `load_registered_stocks` 等
 
-### 3.6 调度层 — app/scheduler/job_scheduler.py
-
-`JobScheduler` 基于 APScheduler `BackgroundScheduler`，按 `INTERVAL_MINUTES` 创建 `IntervalTrigger`，非交易时段自动跳过。
-
-### 3.7 部署 — Parquet on OSS
+### 3.6 部署 — Parquet on OSS
 
 #### 存储结构
 
@@ -232,7 +228,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 s3://{bucket}/
 ├── metadata/
 │   ├── stock_codes.parquet
-│   └── workflows.parquet
+│   └── registered_stocks.parquet
 ├── a/
 │   ├── A_600519.SS_5min.parquet
 │   └── A_000001.SZ_5min.parquet
@@ -271,13 +267,13 @@ s3://{bucket}/
 ```
 POST /api/stock/register {"stock": "阿里巴巴"}
   ├─ detect_market("阿里巴巴") → resolve_stock_name → [('hk','09988'), ('us','BABA')]
-  ├─ _register_one_market('hk', '09988') → create 5min table → save_workflow
-  ├─ _register_one_market('us', 'BABA') → create 5min table → save_workflow
-  └─ 返回 2 个工作流 ID；free mode 下不隐式拉历史
+  ├─ _register_one_market('hk', '09988') → create 5min table → save_registration
+  ├─ _register_one_market('us', 'BABA') → create 5min table → save_registration
+  └─ 返回 2 个 registration id；不隐式拉历史
 
 POST /api/stock/backfill {"stock": "阿里巴巴", "days": 200, "queued": true}
   ├─ enqueue data job
-  ├─ data_sources.registry → iTick / akshare / yfinance → standard 5min OHLCV
+  ├─ data_sources.registry → akshare / yfinance（或显式 iTick）→ standard 5min OHLCV
   ├─ upsert_data by timestamp
   └─ /api/data-jobs/<id> 轮询进度
 
@@ -338,12 +334,10 @@ StockQuantAssisant/
 │   │   └── js/app.js
 │   ├── models/
 │   │   └── database.py
-│   ├── scheduler/
-│   │   └── job_scheduler.py
 │   └── services/
 │       ├── data_sources/
 │       ├── stock_service.py
-│       ├── workflow_service.py
+│       ├── registration_service.py
 │       ├── analysis_service.py
 │       ├── chart_data_service.py
 │       ├── data_service.py
@@ -368,7 +362,7 @@ StockQuantAssisant/
 │   ├── test_stock_service.py
 │   ├── test_structure_boundaries.py
 │   ├── test_trend_no_lookahead.py
-│   └── test_workflow_service.py
+│   └── test_registration_service.py
 └── e2e/
     ├── run.py
     └── test_parquet.py
@@ -376,7 +370,7 @@ StockQuantAssisant/
 
 ## 7. 测试
 
-基于 pytest，共 254 个测试函数覆盖：股票识别、数据源接口、Parquet CRUD、工作流管理、API 端点、前端首页、WebUI 图表数据、回测、三个量化算法、三层决策引擎、多周期合成、90min partial-bar 过滤和集成流程。
+基于 pytest，覆盖：股票识别、数据源接口、Parquet CRUD、注册记录管理、API 端点、前端首页、WebUI 图表数据、回测、三个量化算法、三层决策引擎、多周期合成、90min partial-bar 过滤和集成流程。
 
 ```bash
 pytest tests/ -v                        # 单元测试

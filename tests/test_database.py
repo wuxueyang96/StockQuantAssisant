@@ -154,41 +154,48 @@ class TestMetadataManager:
         df = db.get_all_stock_codes()
         assert len(df) == 2
 
+    def test_find_stock_name_by_code(self, db):
+        db.upsert_stock_code('平安银行', a_code='000001')
+        db.upsert_stock_code('腾讯控股', hk_code='00700')
+        assert db.find_stock_name_by_code('a', '000001') == '平安银行'
+        assert db.find_stock_name_by_code('hk', '00700') == '腾讯控股'
+        assert db.find_stock_name_by_code('us', 'AAPL') is None
+
     def test_delete_stock_code(self, db):
         db.upsert_stock_code('x', a_code='1')
         db.delete_stock_code('x')
         assert db.get_stock_codes('x') is None
 
-    def test_save_and_load_workflow(self, db):
-        db.save_workflow('wf1', {
-            'market': 'a', 'stock_code': '000001', 'interval': 'daily',
-            'table': 'A_000001_daily', 'db_path': '/tmp/test.parquet',
+    def test_save_and_load_registration(self, db):
+        db.save_registration('reg1', {
+            'market': 'a', 'stock_code': '000001', 'interval': '5min',
+            'table': 'A_000001.SZ_5min',
             'created_at': '2024-01-01', 'active': True,
         })
-        workflows = db.load_workflows()
-        assert 'wf1' in workflows
-        assert workflows['wf1']['market'] == 'a'
+        registered = db.load_registered_stocks()
+        assert 'reg1' in registered
+        assert registered['reg1']['market'] == 'a'
 
-    def test_delete_workflow(self, db):
-        db.save_workflow('wf1', {
-            'market': 'a', 'stock_code': '000001', 'interval': 'daily',
-            'table': 'A_000001_daily', 'db_path': '/tmp/test.parquet',
+    def test_delete_registration(self, db):
+        db.save_registration('reg1', {
+            'market': 'a', 'stock_code': '000001', 'interval': '5min',
+            'table': 'A_000001.SZ_5min',
             'created_at': '2024-01-01', 'active': True,
         })
-        db.delete_workflow_by_id('wf1')
-        assert 'wf1' not in db.load_workflows()
+        db.delete_registration_by_id('reg1')
+        assert 'reg1' not in db.load_registered_stocks()
 
-    def test_workflow_persists_across_sessions(self, temp_db_dir):
+    def test_registration_persists_across_sessions(self, temp_db_dir):
         _setup_local_config(temp_db_dir)
         db1 = DatabaseManager()
-        db1.save_workflow('wf_persist', {
-            'market': 'a', 'stock_code': '000001', 'interval': 'daily',
-            'table': 'A_test_daily', 'db_path': '/tmp/test.parquet',
+        db1.save_registration('reg_persist', {
+            'market': 'a', 'stock_code': '000001', 'interval': '5min',
+            'table': 'A_000001.SZ_5min',
             'created_at': '2024-01-01', 'active': True,
         })
         db1.close_all()
 
         db2 = DatabaseManager()
-        workflows = db2.load_workflows()
-        assert 'wf_persist' in workflows
+        registered = db2.load_registered_stocks()
+        assert 'reg_persist' in registered
         db2.close_all()

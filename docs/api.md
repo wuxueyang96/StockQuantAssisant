@@ -7,12 +7,12 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 - [前端控制台](#前端控制台)
 - [健康检查](#健康检查)
 - [股票代码映射](#股票代码映射)
-- [工作流注册](#工作流注册)
+- [股票注册](#股票注册)
 - [数据维护](#数据维护)
 - [量化决策](#量化决策)
 - [行情图表](#行情图表)
 - [回测](#回测)
-- [工作流查询](#工作流查询)
+- [注册记录查询](#注册记录查询)
 
 ---
 
@@ -25,7 +25,7 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 主要能力：
 
 - 输入股票代码或名称并调用 `POST /api/stock/decision` 获取三层次日计划
-- 调用 `POST /api/stock/register` 注册 5min 数据工作流
+- 调用 `POST /api/stock/register` 注册股票
 - 展示 `next_day_plan`、趋势/结构/序列分层信息、执行纪律、WebUI 图表、回测结果和原始 JSON
 
 **响应** `200` — `text/html`
@@ -38,7 +38,7 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 
 **响应** `200`
 ```json
-{ "status": "ok", "scheduler_running": true }
+{ "status": "ok" }
 ```
 
 ---
@@ -85,16 +85,16 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 
 ---
 
-## 工作流注册
+## 股票注册
 
 ### POST /stock/register
 
-根据股票代码或名称注册数据同步工作流。系统自动识别输入类型：
+根据股票代码或名称注册股票。系统自动识别输入类型：
 
 - **代码**：按格式匹配市场（如 `000001.SZ` → A 股，`00700.HK` → 港股，`AAPL` → 美股）
 - **名称**：从 `stock_codes` 表反查，匹配多个市场时一次性注册所有市场
 
-每个市场注册 **1 个 5min 工作流**。高粒度 K 线由 `resample` 运行时合成。
+每个市场注册 **1 个 5min 数据表**。注册不会自动请求外部数据源；高粒度 K 线由 `resample` 运行时合成。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -104,13 +104,13 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 ```json
 {
   "success": true,
-  "message": "工作流已创建",
-  "workflows": ["A_000001.SZ_5min"],
+  "message": "股票已注册",
+  "registration_ids": ["A_000001.SZ_5min"],
   "markets": [{ "market": "a", "stock_code": "000001" }]
 }
 ```
 
-**响应** `200` — 已存在：`"message": "工作流已存在"`，其余同新创建。
+**响应** `200` — 已存在：`"message": "股票已存在"`，其余同新创建。
 
 **响应** `400` — 名称未录入：提示先调用 `POST /api/stock/code` 录入映射。
 
@@ -140,8 +140,8 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
     "daily_bars": 31,
     "first_timestamp": "2026-04-21T09:35:00+08:00",
     "last_timestamp": "2026-06-05T14:55:00+08:00",
-    "data_source": "itick",
-    "itick_free_mode": true,
+    "data_source": "akshare",
+    "free_mode": false,
     "refresh_api_budget": {
       "request_count": 1,
       "estimated_seconds": 0
@@ -152,7 +152,7 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 
 ### POST /stock/refresh
 
-主动刷新已注册股票的最新 5min 数据。当前主数据源为 iTick 且 `ITICK_FREE_MODE=true` 时固定只请求最新一页，并通过本地 `latest_timestamp` 过滤新增行；关闭 free mode 后才使用 `history_days` 窗口刷新。该接口通过统一数据源接口拉取数据，未来切换主数据源时 API 语义不变。
+主动刷新已注册股票的最新 5min 数据。默认主数据源为 AkShare，按 `history_days` 请求最近窗口并通过本地 `latest_timestamp` 过滤新增行。若显式切到 iTick，刷新固定只请求最新一页以节省 REST 次数，并按免费额度限速。该接口通过统一数据源接口拉取数据，未来切换主数据源时 API 语义不变。
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
@@ -161,7 +161,7 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 
 ### POST /refresh
 
-强制刷新所有已录入代码映射且已经注册 5min 工作流的股票。该接口来自 PR #2 的全量刷新能力，当前实现复用 `data_service.refresh_market`，因此会遵守统一数据源接口、free mode、数据状态和 API 预算统计。
+强制刷新所有已录入代码映射且已经注册的股票。该接口来自 PR #2 的全量刷新能力，当前实现复用 `data_service.refresh_market`，因此会遵守统一数据源接口、free mode、数据状态和 API 预算统计。
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
@@ -176,10 +176,10 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
   "total_rows_inserted": 42,
   "errors": 0,
   "api_budget": {
-    "data_source": "itick",
-    "free_mode": true,
+    "data_source": "akshare",
+    "free_mode": false,
     "request_count": 3,
-    "estimated_seconds": 26
+    "estimated_seconds": 0
   },
   "results": []
 }
@@ -545,9 +545,9 @@ curl "http://127.0.0.1:5555/api/stock/chart-data?stock=300274&bars=120"
 
 ---
 
-## 工作流查询
+## 注册记录查询
 
-### GET /stock/\<code\>/workflows
+### GET /stock/\<code\>/registrations
 
 | 参数 | 位置 | 说明 |
 |------|------|------|
@@ -558,7 +558,7 @@ curl "http://127.0.0.1:5555/api/stock/chart-data?stock=300274&bars=120"
 {
   "success": true,
   "stock_code": "000001",
-  "workflows": [{
+  "registrations": [{
     "id": "A_000001.SZ_5min",
     "market": "a",
     "stock_code": "000001",
@@ -571,38 +571,38 @@ curl "http://127.0.0.1:5555/api/stock/chart-data?stock=300274&bars=120"
 }
 ```
 
-### GET /workflows
+### GET /registered-stocks
 
-获取所有已注册工作流。
+获取所有已注册股票。
 
 **响应** `200`
 ```json
 {
   "success": true,
   "count": 1,
-  "workflows": [{ "id": "A_000001.SZ_5min", "market": "a", ... }]
+  "registered_stocks": [{ "id": "A_000001.SZ_5min", "market": "a", ... }]
 }
 ```
 
-### DELETE /workflows/\<workflow_id\>
+### DELETE /registered-stocks/\<registration_id\>
 
 | 参数 | 位置 | 说明 |
 |------|------|------|
-| `workflow_id` | path | 工作流唯一标识 |
+| `registration_id` | path | 注册记录唯一标识 |
 
 **响应** `200`
 ```json
-{ "success": true, "message": "工作流 A_000001.SZ_5min 已删除" }
+{ "success": true, "message": "注册股票 A_000001.SZ_5min 已删除" }
 ```
 
 **响应** `404`
 ```json
-{ "success": false, "message": "工作流 xxx 不存在" }
+{ "success": false, "message": "注册股票 xxx 不存在" }
 ```
 
 ---
 
-## 工作流标识格式
+## 注册标识格式
 
 `{市场}_{股票代码}_{周期}`
 

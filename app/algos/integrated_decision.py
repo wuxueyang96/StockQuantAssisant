@@ -533,6 +533,35 @@ def plan_to_legacy_summary(
     return result
 
 
+def _format_signal_reason(plan: DailyTradingPlan) -> str:
+    decision = plan.decision
+    if decision.action not in ('BUY', 'SELL'):
+        return ''
+
+    verb = '加仓' if decision.action == 'BUY' else '减仓'
+    parts = []
+    if decision.actual_position is not None and decision.final_target_position is not None:
+        parts.append(
+            f"目标仓位由 {_round4(decision.actual_position)} 调整到 "
+            f"{_round4(decision.final_target_position)}，需{verb} {_round4(abs(decision.order_delta or 0))}"
+        )
+    if plan.trend.state:
+        parts.append(f"趋势 {plan.trend.state}")
+    if plan.trend.reason:
+        parts.append(plan.trend.reason)
+    if plan.structure.adjustment:
+        parts.append(f"结构修正 {_round4(plan.structure.adjustment)}")
+    if plan.sequence.high9_active:
+        parts.append('高九活跃，执行上避免追高')
+    if plan.sequence.low9_active:
+        parts.append('低九活跃，执行上避免恐慌杀跌')
+    if decision.confidence_label:
+        parts.append(f"置信 {decision.confidence_label}")
+    if decision.principle:
+        parts.append(decision.principle)
+    return '；'.join(str(x) for x in parts if x)
+
+
 def evaluate_integrated_dataframe(
     df_daily: pd.DataFrame,
     intraday: Optional[Dict[str, pd.DataFrame]] = None,
@@ -553,9 +582,13 @@ def evaluate_integrated_dataframe(
         'trend_state', 'base_target_position', 'position_cap', 'position_floor',
         'final_target_position', 'actual_position', 'order_delta', 'order_weight',
         'action', 'signal_strength', 'confidence_label', 'structure_adjustment',
+        'trend_reason', 'decision_reason', 'principle',
         'high9_active', 'low9_active',
     ]
-    object_cols = {'trend_state', 'action', 'confidence_label'}
+    object_cols = {
+        'trend_state', 'action', 'confidence_label',
+        'trend_reason', 'decision_reason', 'principle',
+    }
     bool_cols = {'high9_active', 'low9_active'}
     for c in cols:
         if c in object_cols:
@@ -612,6 +645,9 @@ def evaluate_integrated_dataframe(
         result.at[idx, 'signal_strength'] = dec.signal_strength
         result.at[idx, 'confidence_label'] = dec.confidence_label
         result.at[idx, 'structure_adjustment'] = plan.structure.adjustment
+        result.at[idx, 'trend_reason'] = plan.trend.reason
+        result.at[idx, 'decision_reason'] = _format_signal_reason(plan)
+        result.at[idx, 'principle'] = dec.principle
         result.at[idx, 'high9_active'] = plan.sequence.high9_active
         result.at[idx, 'low9_active'] = plan.sequence.low9_active
         result.at[idx, 'position'] = dec.final_target_position

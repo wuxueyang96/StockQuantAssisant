@@ -62,17 +62,17 @@ class TestParquetStoreLocal:
     def test_metadata_persists_across_sessions(self):
         db = DatabaseManager()
         db.upsert_stock_code('test_name', a_code='000001', hk_code='09988')
-        db.save_workflow('wf1', {
-            'market': 'a', 'stock_code': '000001', 'interval': 'daily',
-            'table': 'A_test_daily', 'db_path': '/test.parquet',
+        db.save_registration('reg1', {
+            'market': 'a', 'stock_code': '000001', 'interval': '5min',
+            'table': 'A_000001.SZ_5min',
             'created_at': '2024-01-01', 'active': True,
         })
         db.close_all()
 
         db2 = DatabaseManager()
         assert db2.get_stock_codes('test_name') == ('000001', '09988', None)
-        wfs = db2.load_workflows()
-        assert 'wf1' in wfs
+        registered = db2.load_registered_stocks()
+        assert 'reg1' in registered
         db2.close_all()
 
     def test_read_nonexistent_returns_empty(self):

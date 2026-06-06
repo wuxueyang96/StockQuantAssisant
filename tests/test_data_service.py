@@ -25,22 +25,21 @@ def _make_5min(n_days: int = 40, start: str = '2024-01-01') -> pd.DataFrame:
 @pytest.fixture
 def registered_stock(app):
     from app.models.database import db_manager
-    from app.services.workflow_service import workflow_service
+    from app.services.registration_service import registration_service
 
-    wf_id = 'A_000001.SZ_5min'
-    workflow_service.workflows[wf_id] = {
+    registration_id = 'A_000001.SZ_5min'
+    registration_service.registered_stocks[registration_id] = {
         'market': 'a',
         'stock_code': '000001',
         'interval': '5min',
-        'table': wf_id,
-        'db_path': '',
+        'table': registration_id,
         'created_at': '2024-01-01T00:00:00',
         'active': True,
     }
-    db_manager.save_workflow(wf_id, workflow_service.workflows[wf_id])
-    db_manager.insert_data('a', wf_id, _make_5min(n_days=40))
-    yield wf_id
-    workflow_service.workflows.pop(wf_id, None)
+    db_manager.save_registration(registration_id, registration_service.registered_stocks[registration_id])
+    db_manager.insert_data('a', registration_id, _make_5min(n_days=40))
+    yield registration_id
+    registration_service.registered_stocks.pop(registration_id, None)
 
 
 def test_data_status_endpoint(client, registered_stock):
@@ -55,7 +54,8 @@ def test_data_status_endpoint(client, registered_stock):
 
 
 def test_refresh_endpoint_uses_collect_and_store(client, registered_stock, mocker):
-    mocker.patch('app.services.data_service.Config.ITICK_FREE_MODE', False)
+    source = mocker.Mock(free_mode=False)
+    mocker.patch('app.services.data_service.active_data_source', return_value=source)
     mock_collect = mocker.patch('app.services.data_service.collect_and_store', return_value=5)
     resp = client.post('/api/stock/refresh', json={'stock': '000001', 'history_days': 3})
 
@@ -71,7 +71,8 @@ def test_refresh_all_endpoint_refreshes_registered_code(client, registered_stock
     from app.models.database import db_manager
 
     db_manager.upsert_stock_code('测试股票', a_code='000001')
-    mocker.patch('app.services.data_service.Config.ITICK_FREE_MODE', False)
+    source = mocker.Mock(free_mode=False)
+    mocker.patch('app.services.data_service.active_data_source', return_value=source)
     mock_collect = mocker.patch('app.services.data_service.collect_and_store', return_value=7)
 
     resp = client.post('/api/refresh', json={'history_days': 2})
@@ -87,7 +88,8 @@ def test_refresh_all_endpoint_refreshes_registered_code(client, registered_stock
 
 def test_refresh_endpoint_free_mode_uses_one_latest_page(client, registered_stock, mocker):
     df = _make_5min(n_days=1, start='2024-03-15')
-    mocker.patch('app.services.data_service.Config.ITICK_FREE_MODE', True)
+    source = mocker.Mock(free_mode=True, refresh_limit=1000)
+    mocker.patch('app.services.data_service.active_data_source', return_value=source)
     mocker.patch('app.services.data_service.Config.ITICK_FREE_REFRESH_LIMIT', 1000)
     mock_fetch = mocker.patch('app.services.data_service.fetch_stock_data', return_value=df)
 

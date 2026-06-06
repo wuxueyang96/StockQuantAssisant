@@ -16,11 +16,11 @@ from app.services.stock_service import (
     estimate_data_api_usage,
     fetch_stock_data,
     format_stock_code,
+    get_registration_id,
     get_table_name,
-    get_workflow_id,
 )
 from app.services.data_sources import active_data_source
-from app.services.workflow_service import workflow_service
+from app.services.registration_service import registration_service
 
 
 def _to_iso(value) -> Optional[str]:
@@ -100,18 +100,17 @@ def _aggregate_api_budget(results: list[dict]) -> dict:
 
 def _base_record(market: str, stock_code: str) -> dict:
     table = get_table_name(market, stock_code, '5min')
-    wf_id = get_workflow_id(market, stock_code, '5min')
+    registration_id = get_registration_id(market, stock_code, '5min')
     return {
         'market': market,
         'market_label': MARKET_LABEL[market],
         'stock_code': stock_code,
         'display_code': format_stock_code(market, stock_code),
-        'workflow_id': wf_id,
-        'registered': wf_id in workflow_service.workflows,
+        'registration_id': registration_id,
+        'registered': registration_id in registration_service.registered_stocks,
         'table': table,
         'data_source': Config.DATA_SOURCE,
         'free_mode': bool(active_data_source().free_mode),
-        'itick_free_mode': bool(Config.ITICK_FREE_MODE),
     }
 
 
@@ -171,7 +170,7 @@ def get_data_status(stock_input: str) -> dict:
 def refresh_market(market: str, stock_code: str, history_days: int = None) -> dict:
     record = data_status_for_market(market, stock_code)
     if not record['registered']:
-        record['error'] = '该股票尚未注册工作流，请先注册'
+        record['error'] = '该股票尚未注册，请先注册该股票'
         return record
 
     days = int(history_days or Config.REFRESH_5MIN_HISTORY_DAYS)
@@ -263,7 +262,7 @@ def backfill_market(
 ) -> dict:
     record = data_status_for_market(market, stock_code)
     if not record['registered']:
-        record['error'] = '该股票尚未注册工作流，请先注册'
+        record['error'] = '该股票尚未注册，请先注册该股票'
         return record
 
     requested_trading_days = int(days or Config.INITIAL_5MIN_HISTORY_DAYS)

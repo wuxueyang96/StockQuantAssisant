@@ -164,6 +164,21 @@ button:focus-visible {
   gap: 8px;
 }
 
+.name-register-box {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.name-code-row {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 8px;
+}
+
 .primary-btn {
   background: var(--ink);
   border-color: var(--ink);
@@ -228,15 +243,18 @@ button:focus-visible {
 
 .watch-item {
   width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  gap: 3px;
   text-align: left;
 }
 
 .watch-item span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.watch-code {
+  font-weight: 700;
 }
 
 .content {
@@ -745,6 +763,7 @@ pre {
   }
 
   .input-row,
+  .name-code-row,
   .summary-band {
     grid-template-columns: 1fr;
   }
@@ -1063,6 +1082,42 @@ pre {
   font-size: 11px;
   font-weight: 800;
   pointer-events: none;
+}
+
+.signal-tooltip {
+  position: absolute;
+  z-index: 6;
+  max-width: min(340px, calc(100% - 24px));
+  transform: translateX(-50%);
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid rgba(45, 49, 43, 0.18);
+  border-left: 4px solid var(--green);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 24px rgba(32, 34, 31, 0.16);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.42;
+  pointer-events: none;
+}
+
+.signal-tooltip[hidden] {
+  display: none;
+}
+
+.signal-tooltip.sell {
+  border-left-color: var(--red);
+}
+
+.signal-tooltip strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.signal-tooltip span {
+  color: var(--muted);
 }
 
 .tv-chart-surface {

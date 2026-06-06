@@ -2,7 +2,7 @@ import pytest
 import pandas as pd
 from app.services.stock_service import (
     detect_market, resolve_stock_name, format_stock_code,
-    get_workflow_id, get_table_name, get_yfinance_ticker, is_trading_time,
+    get_registration_id, get_table_name, get_yfinance_ticker, is_trading_time,
 )
 
 
@@ -84,21 +84,21 @@ class TestFormatStockCode:
         assert format_stock_code('us', 'AAPL') == 'AAPL.US'
 
 
-class TestGetWorkflowId:
+class TestGetRegistrationId:
     def test_a_stock_daily(self):
-        assert get_workflow_id('a', '000001', 'daily') == 'A_000001.SZ_daily'
+        assert get_registration_id('a', '000001', 'daily') == 'A_000001.SZ_daily'
 
     def test_hk_stock_120min(self):
-        assert get_workflow_id('hk', '00700', '120min') == 'HK_00700.HK_120min'
+        assert get_registration_id('hk', '00700', '120min') == 'HK_00700.HK_120min'
 
     def test_us_stock_60min(self):
-        assert get_workflow_id('us', 'AAPL', '60min') == 'US_AAPL.US_60min'
+        assert get_registration_id('us', 'AAPL', '60min') == 'US_AAPL.US_60min'
 
-    def test_table_name_matches_workflow_id(self):
+    def test_table_name_matches_registration_id(self):
         for interval in ['daily', '120min', '90min', '60min']:
-            wf_id = get_workflow_id('a', '000001', interval)
+            registration_id = get_registration_id('a', '000001', interval)
             tbl = get_table_name('a', '000001', interval)
-            assert tbl == wf_id
+            assert tbl == registration_id
 
 
 class TestGetYfinanceTicker:
@@ -211,7 +211,6 @@ class TestITickSource:
         mocker.patch.object(stock_service.Config, 'ITICK_TOKEN', 'token')
         mocker.patch.object(stock_service.Config, 'ITICK_PAGE_LIMIT', 1000)
         mocker.patch.object(stock_service.Config, 'ITICK_MAX_PAGES', 2)
-        mocker.patch.object(stock_service.Config, 'ITICK_PAGE_DELAY_SECONDS', 0)
         mock_request = mocker.patch.object(stock_service, '_itick_request', side_effect=[
             {
                 'code': 0,
@@ -237,7 +236,6 @@ class TestITickSource:
     def test_itick_api_usage_estimate_for_free_mode(self, mocker):
         from app.services import stock_service
 
-        mocker.patch.object(stock_service.Config, 'ITICK_FREE_MODE', True)
         mocker.patch.object(stock_service.Config, 'ITICK_FREE_MIN_INTERVAL_SECONDS', 13)
         mocker.patch.object(stock_service.Config, 'ITICK_PAGE_LIMIT', 1000)
 
@@ -252,7 +250,6 @@ class TestITickSource:
 
         t1 = int(pd.Timestamp('2024-01-02T01:35:00Z').timestamp() * 1000)
         mocker.patch.object(stock_service.Config, 'ITICK_TOKEN', 'token')
-        mocker.patch.object(stock_service.Config, 'ITICK_FREE_MODE', False)
         mock_request = mocker.patch.object(stock_service, '_itick_request', return_value={
             'code': 0,
             'data': [
@@ -277,6 +274,7 @@ class TestInitialHistoryWindow:
     def test_config_uses_200_days_for_5min(self):
         from app.config import Config
 
+        assert Config.DATA_SOURCE == 'akshare'
         assert Config.INITIAL_5MIN_HISTORY_DAYS == 200
         assert Config.INTERVAL_MAP['5min']['period'] == '200d'
 

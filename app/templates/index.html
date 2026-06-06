@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StockQuant 控制台</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=20260606-trend-values">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=20260606-registered-stocks">
 </head>
 <body>
   <div class="app-shell">
@@ -276,6 +276,19 @@
             <button type="button" id="registerBtn">注册</button>
             <button type="button" id="chartBtn">图表</button>
           </div>
+          <div class="name-register-box">
+            <label for="stockNameInput">名称注册</label>
+            <input id="stockNameInput" type="text" placeholder="股票名称" autocomplete="off">
+            <div class="name-code-row">
+              <select id="stockMarketSelect" aria-label="市场">
+                <option value="a">A股</option>
+                <option value="hk">港股</option>
+                <option value="us">美股</option>
+              </select>
+              <input id="stockCodeInput" type="text" placeholder="代码" autocomplete="off">
+            </div>
+            <button type="button" id="registerByNameBtn">保存并注册</button>
+          </div>
           <button type="button" id="backtestBtn">回测</button>
         </form>
 
@@ -305,7 +318,7 @@
             <button type="button" id="refreshBtn">刷新数据</button>
             <label>
               <span>向前补交易日</span>
-              <input id="backfillDaysInput" type="number" min="1" max="500" value="200">
+              <input id="backfillDaysInput" type="number" min="1" max="2500" value="200">
             </label>
             <div class="api-budget" id="apiBudget">补历史预计 API: --</div>
             <button type="button" id="backfillDataBtn">补历史数据</button>
@@ -321,6 +334,6 @@
   </div>
 
   <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=20260606-trend-values" defer></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=20260606-registered-stocks" defer></script>
 </body>
 </html>

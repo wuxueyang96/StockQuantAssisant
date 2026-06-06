@@ -56,7 +56,7 @@ def format_stock_code(market: str, stock_code: str) -> str:
     return f"{stock_code}{suffix}"
 
 
-def get_workflow_id(market: str, stock_code: str, interval: str) -> str:
+def get_registration_id(market: str, stock_code: str, interval: str) -> str:
     code = format_stock_code(market, stock_code)
     return f"{MARKET_LABEL[market]}_{code}_{interval}"
 
@@ -196,16 +196,15 @@ def estimate_itick_api_usage(
             rows = max(bars_per_day, int(trading_days or 1) * bars_per_day)
         request_count = max(1, math.ceil(int(rows) / page_limit))
     free_interval = max(0.0, float(Config.ITICK_FREE_MIN_INTERVAL_SECONDS))
-    estimated_seconds = (max(0, int(request_count) - 1) * free_interval
-                         if Config.ITICK_FREE_MODE else 0.0)
+    estimated_seconds = max(0, int(request_count) - 1) * free_interval
     return {
         'data_source': Config.DATA_SOURCE,
-        'free_mode': bool(Config.ITICK_FREE_MODE),
+        'free_mode': True,
         'market': market,
         'bars_per_trading_day': bars_per_day,
         'page_limit': page_limit,
         'request_count': int(request_count),
-        'min_interval_seconds': free_interval if Config.ITICK_FREE_MODE else 0.0,
+        'min_interval_seconds': free_interval,
         'estimated_seconds': estimated_seconds,
     }
 
@@ -241,8 +240,6 @@ def _itick_target_rows(market: str, history_days: int = None, start_date=None, e
 
 def _apply_itick_free_rate_limit():
     global _itick_next_request_at
-    if not Config.ITICK_FREE_MODE:
-        return
     min_interval = max(0.0, float(Config.ITICK_FREE_MIN_INTERVAL_SECONDS))
     if min_interval <= 0:
         return
@@ -403,10 +400,6 @@ def _fetch_5m_itick(market: str, stock_code: str, history_days: int = None,
         if min_time <= start or len(all_items) >= target_rows:
             break
         et = min_ts - 1
-        delay_seconds = float(Config.ITICK_PAGE_DELAY_SECONDS)
-        if delay_seconds > 0 and not Config.ITICK_FREE_MODE:
-            time.sleep(delay_seconds)
-
     df = _normalize_itick_kline(all_items, market)
     if df.empty:
         logger.warning(f"iTick 返回空数据: {region}/{code}")
@@ -570,7 +563,7 @@ def is_trading_time(market: str) -> bool:
 
 
 def get_table_name(market: str, stock_code: str, interval: str) -> str:
-    return get_workflow_id(market, stock_code, interval)
+    return get_registration_id(market, stock_code, interval)
 
 
 def collect_and_store(market: str, stock_code: str, interval: str = '5min',

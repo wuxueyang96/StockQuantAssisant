@@ -113,17 +113,23 @@ class DatabaseManager:
             return
         self._metadata_loaded = True
         conn = self._get_conn()
-        try:
-            conn.execute("SELECT COUNT(*) FROM stock_codes").fetchone()
+        existing_tables = set()
+        for name in ('stock_codes', 'registered_stocks'):
+            try:
+                conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()
+                existing_tables.add(name)
+            except Exception:
+                pass
+        if existing_tables == {'stock_codes', 'registered_stocks'}:
             return
-        except Exception:
-            pass
 
         # 始终使用显式 schema 创建表，再从 parquet（如有）回填。
         # 避免 pandas 的 None 列被 DuckDB 推断为 Int32，导致后续 INSERT 字符串失败。
-        for table_name in ('stock_codes', 'workflows'):
+        for table_name in ('stock_codes', 'registered_stocks'):
             url = self._meta_url(table_name)
             if table_name == 'stock_codes':
+                if table_name in existing_tables:
+                    continue
                 conn.execute("""
                     CREATE TABLE stock_codes (
                         name TEXT PRIMARY KEY,
@@ -143,36 +149,51 @@ class DatabaseManager:
                     )
                     conn.unregister('__seed_df')
             else:
+                if table_name in existing_tables:
+                    continue
                 conn.execute("""
-                    CREATE TABLE workflows (
+                    CREATE TABLE registered_stocks (
                         id TEXT PRIMARY KEY,
                         market TEXT,
                         stock_code TEXT,
                         interval TEXT,
                         "table" TEXT,
-                        db_path TEXT,
                         created_at TEXT,
                         active INTEGER
                     )
                 """)
                 df = self._try_read_parquet(url)
+                if df.empty:
+                    df = self._try_read_parquet(self._meta_url('workflows'))
                 if not df.empty:
-                    conn.register('__seed_df', df)
-                    conn.execute(
-                        "INSERT INTO workflows (id, market, stock_code, interval, \"table\", "
-                        "                       db_path, created_at, active) "
-                        "SELECT CAST(id AS TEXT), CAST(market AS TEXT), CAST(stock_code AS TEXT), "
-                        "       CAST(interval AS TEXT), CAST(\"table\" AS TEXT), "
-                        "       CAST(db_path AS TEXT), CAST(created_at AS TEXT), "
-                        "       CAST(active AS INTEGER) "
-                        "FROM __seed_df"
-                    )
-                    conn.unregister('__seed_df')
+                    for _, row in df.iterrows():
+                        active = row.get('active', True)
+                        active_flag = True if pd.isna(active) else bool(active)
+                        registration_id = row.get('id')
+                        if pd.isna(registration_id):
+                            continue
+                        interval = row.get('interval')
+                        if pd.isna(interval) or str(interval) != '5min':
+                            continue
+                        conn.execute(
+                            "INSERT OR REPLACE INTO registered_stocks "
+                            "(id, market, stock_code, interval, \"table\", created_at, active) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            [
+                                str(registration_id),
+                                None if pd.isna(row.get('market')) else str(row.get('market')),
+                                None if pd.isna(row.get('stock_code')) else str(row.get('stock_code')),
+                                str(interval),
+                                None if pd.isna(row.get('table')) else str(row.get('table')),
+                                None if pd.isna(row.get('created_at')) else str(row.get('created_at')),
+                                1 if active_flag else 0,
+                            ],
+                        )
 
     def _flush_metadata(self):
         if not self._metadata_loaded or self._conn is None:
             return
-        for table_name in ('stock_codes', 'workflows'):
+        for table_name in ('stock_codes', 'registered_stocks'):
             url = self._meta_url(table_name)
             self._conn.execute(
                 f"COPY {table_name} TO '{url}' (FORMAT PARQUET, OVERWRITE_OR_IGNORE true)"
@@ -378,6 +399,22 @@ class DatabaseManager:
             return row[0], row[1], row[2]
         return None
 
+    def find_stock_name_by_code(self, market: str, stock_code: str) -> Optional[str]:
+        conn = self._get_metadata_conn()
+        column_map = {
+            'a': 'a_code',
+            'hk': 'hk_code',
+            'us': 'us_code',
+        }
+        column = column_map.get(market)
+        if column is None:
+            return None
+        row = conn.execute(
+            f"SELECT name FROM stock_codes WHERE {column} = ? ORDER BY name LIMIT 1",
+            [stock_code],
+        ).fetchone()
+        return row[0] if row else None
+
     def get_all_stock_codes(self) -> pd.DataFrame:
         conn = self._get_metadata_conn()
         return conn.execute("SELECT * FROM stock_codes ORDER BY name").fetchdf()
@@ -388,50 +425,48 @@ class DatabaseManager:
         self._flush_metadata()
         return True
 
-    # ── workflows ──
+    # ── registered stocks ──
 
-    def save_workflow(self, wf_id: str, wf_data: dict):
+    def save_registration(self, registration_id: str, registration_data: dict):
         conn = self._get_metadata_conn()
         conn.execute(
-            "INSERT OR REPLACE INTO workflows "
-            "(id, market, stock_code, interval, \"table\", db_path, created_at, active) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO registered_stocks "
+            "(id, market, stock_code, interval, \"table\", created_at, active) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                wf_id,
-                wf_data.get('market'),
-                wf_data.get('stock_code'),
-                wf_data.get('interval'),
-                wf_data.get('table'),
-                wf_data.get('db_path'),
-                wf_data.get('created_at'),
-                1 if wf_data.get('active', True) else 0,
+                registration_id,
+                registration_data.get('market'),
+                registration_data.get('stock_code'),
+                registration_data.get('interval'),
+                registration_data.get('table'),
+                registration_data.get('created_at'),
+                1 if registration_data.get('active', True) else 0,
             ]
         )
         self._flush_metadata()
 
-    def load_workflows(self) -> dict:
+    def load_registered_stocks(self) -> dict:
         conn = self._get_metadata_conn()
         rows = conn.execute(
-            "SELECT id, market, stock_code, interval, \"table\", db_path, "
-            "created_at, active FROM workflows"
+            "SELECT id, market, stock_code, interval, \"table\", created_at, active "
+            "FROM registered_stocks WHERE interval = '5min'"
         ).fetchall()
-        workflows = {}
+        registered = {}
         for row in rows:
-            wf_id, market, stock_code, interval, tbl, db_path, created_at, active = row
-            workflows[wf_id] = {
+            registration_id, market, stock_code, interval, tbl, created_at, active = row
+            registered[registration_id] = {
                 'market': market,
                 'stock_code': stock_code,
                 'interval': interval,
                 'table': tbl,
-                'db_path': db_path,
                 'created_at': created_at,
                 'active': bool(active),
             }
-        return workflows
+        return registered
 
-    def delete_workflow_by_id(self, wf_id: str) -> bool:
+    def delete_registration_by_id(self, registration_id: str) -> bool:
         conn = self._get_metadata_conn()
-        conn.execute("DELETE FROM workflows WHERE id = ?", [wf_id])
+        conn.execute("DELETE FROM registered_stocks WHERE id = ?", [registration_id])
         self._flush_metadata()
         return True
 

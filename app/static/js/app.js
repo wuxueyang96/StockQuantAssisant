@@ -15,6 +15,7 @@ const state = {
     latestSnapshot: null,
     resizeObserver: null,
     resizeFrame: null,
+    signalTooltip: null,
   },
 };
 
@@ -269,6 +270,38 @@ async function registerStock() {
   }
 }
 
+async function registerStockByName() {
+  const name = $('stockNameInput').value.trim();
+  const market = $('stockMarketSelect').value;
+  const code = $('stockCodeInput').value.trim();
+  if (!name || !code) {
+    setMessage('名称和代码不能为空', 'error');
+    return;
+  }
+  setBusy(true);
+  setMessage('保存并注册中');
+  try {
+    const resp = await fetch('/api/stock/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, market, code }),
+    });
+    const payload = await resp.json();
+    if (!resp.ok || payload.success === false) {
+      throw new Error(payload.message || '注册失败');
+    }
+    $('stockInput').value = name;
+    state.stock = name;
+    setMessage(payload.message || '已注册');
+    await loadWatchlist();
+    await loadDataStatus(false);
+  } catch (err) {
+    setMessage(err.message || String(err), 'error');
+  } finally {
+    setBusy(false);
+  }
+}
+
 function renderDataStatus(result) {
   const rows = [];
   if (!result) {
@@ -282,7 +315,7 @@ function renderDataStatus(result) {
     rows.push(['日线数量', result.daily_bars]);
     rows.push(['开始', result.first_timestamp ? result.first_timestamp.slice(0, 10) : '--']);
     rows.push(['结束', result.last_timestamp ? result.last_timestamp.slice(0, 10) : '--']);
-    rows.push(['数据源', `${result.data_source || '--'}${result.itick_free_mode ? ' / free' : ''}`]);
+    rows.push(['数据源', `${result.data_source || '--'}${result.free_mode ? ' / free' : ''}`]);
     if (result.refresh_api_budget) rows.push(['刷新 API', apiBudgetText(result.refresh_api_budget)]);
     if (result.api_budget) rows.push(['本次 API', apiBudgetText(result.api_budget)]);
     if (result.rows_inserted !== undefined) rows.push(['新增行', result.rows_inserted]);
@@ -309,7 +342,7 @@ function renderApiBudgetFromEstimate(payload) {
 
 async function loadBackfillEstimate() {
   const stock = $('stockInput').value.trim();
-  const days = Math.max(1, Math.min(500, Number($('backfillDaysInput').value || 200)));
+  const days = Math.max(1, Math.min(2500, Number($('backfillDaysInput').value || 200)));
   if (!stock) return;
   try {
     const resp = await fetch(`/api/stock/backfill-estimate?stock=${encodeURIComponent(stock)}&days=${encodeURIComponent(days)}`);
@@ -371,7 +404,7 @@ async function refreshStockData() {
 async function backfillStockData() {
   const stock = $('stockInput').value.trim();
   if (!stock) return;
-  const days = Math.max(1, Math.min(500, Number($('backfillDaysInput').value || 200)));
+  const days = Math.max(1, Math.min(2500, Number($('backfillDaysInput').value || 200)));
   $('backfillDaysInput').value = days;
   setBusy(true);
   setMessage('补历史中');
@@ -880,6 +913,10 @@ function destroyTradingCharts() {
   state.tv.priceChart = null;
   state.tv.macdChart = null;
   state.tv.candleSeries = null;
+  if (state.tv.signalTooltip) {
+    state.tv.signalTooltip.remove();
+    state.tv.signalTooltip = null;
+  }
 }
 
 function destroyBacktestCharts() {
@@ -1003,6 +1040,72 @@ function renderChartLegend(snapshot) {
   });
 }
 
+function signalReasonText(decision) {
+  if (!decision) return '';
+  const direction = decision.action === 'BUY' ? '买入' : '卖出';
+  return decision.reason || [
+    `${direction}信号`,
+    decision.actual_position !== null && decision.target_position !== null
+      ? `目标仓位 ${fmt(decision.actual_position)} -> ${fmt(decision.target_position)}`
+      : '',
+    decision.order_delta !== null ? `订单差值 ${fmt(decision.order_delta)}` : '',
+    decision.trend_state ? `趋势 ${decision.trend_state}` : '',
+    decision.confidence_label ? `置信 ${decision.confidence_label}` : '',
+    decision.principle || '',
+  ].filter(Boolean).join('；');
+}
+
+function getSignalTooltip() {
+  if (state.tv.signalTooltip?.isConnected) return state.tv.signalTooltip;
+  const pane = document.querySelector('.price-pane');
+  if (!pane) return null;
+  const tooltip = document.createElement('div');
+  tooltip.id = 'signalTooltip';
+  tooltip.className = 'signal-tooltip';
+  tooltip.hidden = true;
+  pane.appendChild(tooltip);
+  state.tv.signalTooltip = tooltip;
+  return tooltip;
+}
+
+function hideSignalTooltip() {
+  if (state.tv.signalTooltip) state.tv.signalTooltip.hidden = true;
+}
+
+function showSignalTooltip(param, decision) {
+  const tooltip = getSignalTooltip();
+  const pane = document.querySelector('.price-pane');
+  const surface = $('priceChart');
+  if (!tooltip || !pane || !surface || !param?.point || !decision) {
+    hideSignalTooltip();
+    return;
+  }
+
+  tooltip.textContent = '';
+  tooltip.className = `signal-tooltip ${String(decision.action || '').toLowerCase()}`;
+  const title = document.createElement('strong');
+  title.textContent = `${dateKey(decision.time)} ${decision.action}`;
+  const body = document.createElement('span');
+  body.textContent = signalReasonText(decision);
+  tooltip.append(title, body);
+  tooltip.hidden = false;
+  tooltip.style.left = '0px';
+  tooltip.style.top = '0px';
+
+  const rawLeft = surface.offsetLeft + Number(param.point.x || 0);
+  const rawTop = surface.offsetTop + Number(param.point.y || 0);
+  const width = tooltip.offsetWidth || 260;
+  const height = tooltip.offsetHeight || 72;
+  const minLeft = 12 + width / 2;
+  const maxLeft = Math.max(minLeft, pane.clientWidth - 12 - width / 2);
+  const left = Math.min(Math.max(rawLeft, minLeft), maxLeft);
+  let top = rawTop - height - 12;
+  if (top < surface.offsetTop + 8) top = rawTop + 18;
+  top = Math.min(top, Math.max(surface.offsetTop + 8, pane.clientHeight - height - 8));
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
 function renderTradingCharts(visible) {
   const stack = $('chartStack');
   if (!hasLightweightCharts()) {
@@ -1097,6 +1200,11 @@ function renderTradingCharts(visible) {
   const candleByTime = new Map(candles.map((item) => [chartItemKey(item, interval), item]));
   const macdByTime = new Map(macd.map((item) => [chartItemKey(item, interval), item]));
   const trendByTime = new Map((source.trend || []).map((item) => [chartItemKey(item, 'daily'), item]));
+  const signalByTime = new Map(
+    (interval === 'daily' ? (source.decisions || []) : [])
+      .filter((item) => item.action === 'BUY' || item.action === 'SELL')
+      .map((item) => [chartItemKey(item, interval), item])
+  );
   const latestCandle = candles[candles.length - 1];
   const latestKey = chartItemKey(latestCandle, interval);
   state.tv.latestSnapshot = {
@@ -1127,8 +1235,16 @@ function renderTradingCharts(visible) {
         : key,
     });
   };
-  priceChart.subscribeCrosshairMove((param) => updateLegendAt(param.time));
-  macdChart.subscribeCrosshairMove((param) => updateLegendAt(param.time));
+  priceChart.subscribeCrosshairMove((param) => {
+    updateLegendAt(param.time);
+    const decision = signalByTime.get(chartTimeKey(param.time));
+    if (decision) showSignalTooltip(param, decision);
+    else hideSignalTooltip();
+  });
+  macdChart.subscribeCrosshairMove((param) => {
+    updateLegendAt(param.time);
+    hideSignalTooltip();
+  });
   syncTimeScales(priceChart, macdChart);
   priceChart.timeScale().fitContent();
   macdChart.timeScale().fitContent();
@@ -1500,16 +1616,16 @@ function renderTrades(trades) {
 
 async function loadWatchlist() {
   try {
-    const resp = await fetch('/api/workflows');
+    const resp = await fetch('/api/registered-stocks');
     const payload = await resp.json();
     const root = $('watchlist');
     root.textContent = '';
-    if (!resp.ok || payload.success === false || !payload.workflows?.length) {
+    if (!resp.ok || payload.success === false || !payload.registered_stocks?.length) {
       root.textContent = '暂无注册股票';
       return;
     }
     const registered = new Map();
-    payload.workflows.forEach((item) => {
+    payload.registered_stocks.forEach((item) => {
       const key = `${item.market}:${item.stock_code}`;
       if (!registered.has(key)) registered.set(key, item);
     });
@@ -1518,12 +1634,15 @@ async function loadWatchlist() {
       btn.type = 'button';
       btn.className = 'watch-item';
       const name = document.createElement('strong');
-      name.textContent = item.display_code || item.stock_code;
+      const displayCode = item.display_code || item.stock_code;
+      const displayName = item.stock_name || displayCode;
+      name.textContent = displayName;
       const meta = document.createElement('span');
-      meta.textContent = `${String(item.market || '').toUpperCase()} / ${item.active === false ? '暂停' : '启用'}`;
+      meta.className = 'watch-code';
+      meta.textContent = `${displayCode} / ${item.active === false ? '暂停' : '启用'}`;
       btn.append(name, meta);
       btn.addEventListener('click', () => {
-        $('stockInput').value = item.display_code || item.stock_code;
+        $('stockInput').value = item.stock_name || displayCode;
         analyzeStock();
       });
       root.appendChild(btn);
@@ -1563,6 +1682,7 @@ document.addEventListener('DOMContentLoaded', () => {
     analyzeStock();
   });
   $('registerBtn').addEventListener('click', registerStock);
+  $('registerByNameBtn').addEventListener('click', registerStockByName);
   $('chartBtn').addEventListener('click', () => loadChartData(true));
   $('backtestBtn').addEventListener('click', () => runBacktest(true));
   $('refreshBtn').addEventListener('click', refreshStockData);

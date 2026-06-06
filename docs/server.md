@@ -1,6 +1,6 @@
 # 服务端程序需求与当前实现
 
-StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台、REST API、行情数据采集、任务调度和日频量化决策。当前实现以 **5min 采集 + 运行时重采样 + 三层次日计划** 为核心。
+StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台、REST API、手动行情数据维护、回测和日频量化决策。当前实现以 **5min 采集 + 运行时重采样 + 三层次日计划** 为核心。
 
 ---
 
@@ -8,7 +8,7 @@ StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台
 
 - `GET /`：返回内置前端控制台。
 - `POST /api/stock/decision`：输入股票代码或名称，返回最新三层次日交易计划。
-- `POST /api/stock/register`：注册数据同步工作流。
+- `POST /api/stock/register`：注册股票。
 - `GET /api/stock/chart-data`：返回 WebUI 绘图用 JSON。
 - `POST /api/stock/backtest`：回测整合决策，输出收益曲线、回撤、仓位和交易明细。
 - `GET /api/stock/data-status`：查看本地 5min 数据状态。
@@ -30,9 +30,9 @@ StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台
 
 ---
 
-## 2. 工作流唯一标识
+## 2. 注册记录唯一标识
 
-当前采集层只创建 **1 个 5min 工作流**。高周期 K 线不落库，由 `resample` 在决策时从 5min 数据运行时合成。
+当前采集层只创建 **1 个 5min 注册记录**。高周期 K 线不落库，由 `resample` 在决策时从 5min 数据运行时合成。
 
 格式：`{市场}_{股票代码}_5min`
 
@@ -42,15 +42,15 @@ StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台
 | 港股 | `HK_00700.HK_5min` |
 | 美股 | `US_AAPL.US_5min` |
 
-历史的 `daily` / `120min` / `90min` / `60min` 工作流不再创建。
+历史的 `daily` / `120min` / `90min` / `60min` 注册记录不再创建。
 
 ---
 
 ## 3. 数据库与表结构
 
 - 数据以 **Parquet 列存格式** 存储在 OSS / S3 / MinIO，未配置 OSS 时使用本地目录。
-- 每个 5min 工作流对应一个 Parquet 文件：`{market}/{table_name}.parquet`。
-- 元数据（`stock_codes` / `workflows`）存储在 `metadata/` 目录下。
+- 每个 5min 注册记录对应一个 Parquet 文件：`{market}/{table_name}.parquet`。
+- 元数据（`stock_codes` / `registered_stocks`）存储在 `metadata/` 目录下。
 - DuckDB 通过 httpfs 远程读写 Parquet，实现存算分离。
 
 目录结构：
@@ -59,7 +59,7 @@ StockQuantAssisant 是一个 Python + Flask 服务，提供内置前端控制台
 s3://{bucket}/
 ├── metadata/
 │   ├── stock_codes.parquet
-│   └── workflows.parquet
+│   └── registered_stocks.parquet
 ├── a/
 │   └── A_000001.SZ_5min.parquet
 ├── hk/
@@ -70,29 +70,26 @@ s3://{bucket}/
 
 ---
 
-## 4. 工作流注册时的初始化
+## 4. 股票注册
 
 注册新股票时：
 
 1. 解析输入市场和代码。
-2. 为每个市场检查唯一 5min 工作流。
+2. 为每个市场检查唯一 5min 注册记录。
 3. 若对应 Parquet 文件不存在，则创建表。
-4. 保存工作流元数据。
-5. 当前主数据源为 iTick 且 `ITICK_FREE_MODE=true` 时不自动拉历史，用户通过“刷新数据”或“补历史数据”显式消耗 API。
-6. 关闭 free mode 且启用 `STOCKQUANT_AUTO_COLLECT` 后，调度器才按工作流周期自动采集。
+4. 保存注册元数据。
+5. 不自动拉取初始历史数据；用户通过“刷新数据”或“补历史数据”显式消耗数据源 API。
 
-若工作流已存在但数据表为空，free mode 下仍只保留注册状态，不隐式请求外部数据源。
+若注册记录已存在但数据表为空，系统仍只保留注册状态，不隐式请求外部数据源。
 
 ---
 
-## 5. 调度与更新策略
+## 5. 手动更新策略
 
-| 工作流周期 | 执行间隔 | 数据用途 |
-|------------|----------|----------|
-| 5min | 每 5 分钟 | 原始行情采集；决策时合成 daily / 60min / 90min / 120min |
-
-- 每次采集会与已有数据按时间戳去重合并。
-- 调度任务在非交易时段跳过。
+- `POST /api/stock/refresh`：刷新单个已注册股票。
+- `POST /api/refresh`：刷新所有已录入且已注册的股票。
+- `POST /api/stock/backfill`：补历史数据，按 timestamp upsert 合并。
+- iTick 固定按免费额度限速；AkShare / yfinance 由数据源自身限制决定。
 - 高周期 K 线由 `app/services/resample.py` 合成：按交易日分组、按日内 K 线序号切桶，不跨日合并。
 - 90min 最后一根不足 18 根 5min 时标记 `partial_bar=true`，默认只用于展示，不参与结构交易确认。
 
@@ -120,11 +117,11 @@ weight = order_weight = clamp(abs(order_delta) / 10, 0, 1)
 
 ---
 
-## 7. 工作流持久化
+## 7. 注册记录持久化
 
-- 工作流元数据写入 `metadata/workflows.parquet`。
-- 服务启动时加载已有工作流。
-- 注册接口会返回已存在的工作流，避免重复创建。
+- 注册元数据写入 `metadata/registered_stocks.parquet`。
+- 服务启动时加载已有注册记录。
+- 注册接口会返回已存在的注册记录，避免重复创建。
 - Stateless 部署模式下，多个实例可共享同一个 OSS 存储。
 
 ---
@@ -154,8 +151,7 @@ weight = order_weight = clamp(abs(order_delta) / 10, 0, 1)
 
 - Python + Flask
 - DuckDB + Parquet on OSS
-- APScheduler 任务调度
-- 统一数据源接口，iTick 主数据源，akshare + yfinance 兼容兜底
+- 统一数据源接口，AkShare 默认主数据源，iTick 可选，yfinance 兜底
 - pandas / NumPy 数据处理
 - TradingView Lightweight Charts 行情图 + 回测图，Canvas fallback
 - 无构建链前端：Flask template + static CSS/JS

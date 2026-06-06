@@ -145,24 +145,24 @@ class TestIntegration:
         db_manager.close_all()
 
     def test_full_register_single(self, full_setup):
-        from app.services.workflow_service import workflow_service
+        from app.services.registration_service import registration_service
         from app.models.database import db_manager
 
-        workflow_service.workflows = {}
-        result = workflow_service.register_stock('000001')
+        registration_service.registered_stocks = {}
+        result = registration_service.register_stock('000001')
         assert result['success'] is True
-        # 单市场仅创建 1 个 5min 工作流
-        assert len(result['workflows']) == 1
-        assert result['workflows'][0].endswith('_5min')
+        # 单市场仅创建 1 个 5min 注册记录
+        assert len(result['registration_ids']) == 1
+        assert result['registration_ids'][0].endswith('_5min')
 
     def test_code_register_then_stock_register(self, full_setup):
         from app.models.database import db_manager
-        from app.services.workflow_service import workflow_service
+        from app.services.registration_service import registration_service
 
         db_manager.upsert_stock_code('阿里巴巴', hk_code='09988', us_code='BABA')
-        workflow_service.workflows = {}
-        result = workflow_service.register_stock('阿里巴巴')
+        registration_service.registered_stocks = {}
+        result = registration_service.register_stock('阿里巴巴')
         assert result['success'] is True
-        # 双市场 → 2 个 5min 工作流（HK + US）
-        assert len(result['workflows']) == 2
-        assert all(w.endswith('_5min') for w in result['workflows'])
+        # 双市场 → 2 个 5min 注册记录（HK + US）
+        assert len(result['registration_ids']) == 2
+        assert all(x.endswith('_5min') for x in result['registration_ids'])

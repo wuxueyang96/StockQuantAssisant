@@ -53,6 +53,10 @@ def _json_bool(value) -> bool:
     return bool(value)
 
 
+def _is_number(value) -> bool:
+    return value is not None and not pd.isna(value)
+
+
 def _time(ts) -> str:
     return pd.Timestamp(ts).isoformat()
 
@@ -126,14 +130,23 @@ def _decision_points(df_daily: pd.DataFrame, intraday: dict[str, pd.DataFrame], 
     rows = []
     for ts, row in decisions.tail(bars).iterrows():
         target = row.get('final_target_position')
+        actual = row.get('actual_position')
+        delta = row.get('order_delta')
         rows.append({
             'time': _time(ts),
             'action': row.get('action') or 'WAIT',
+            'actual_position': _json_number(actual, 4) if _is_number(actual) else None,
             'target_position': None if pd.isna(target) else _json_number(target, 4),
+            'order_delta': _json_number(delta, 4) if _is_number(delta) else None,
             'order_weight': _json_number(row.get('order_weight'), 6),
             'confidence_label': row.get('confidence_label'),
             'trend_state': row.get('trend_state'),
+            'trend_reason': row.get('trend_reason'),
+            'reason': row.get('decision_reason'),
+            'principle': row.get('principle'),
             'structure_adjustment': _json_number(row.get('structure_adjustment'), 4),
+            'high9_active': _json_bool(row.get('high9_active')),
+            'low9_active': _json_bool(row.get('low9_active')),
         })
     return rows
 
@@ -181,7 +194,7 @@ def build_chart_data_for_market(market: str, stock_code: str, bars: int = 180) -
     df_5m = _load_5min(market, stock_code)
     table = get_table_name(market, stock_code, '5min')
     if df_5m is None or df_5m.empty:
-        raise ValueError(f'数据表 {table} 不存在或为空，请先注册该股票工作流')
+        raise ValueError(f'数据表 {table} 不存在或为空，请先注册该股票并刷新/补历史数据')
 
     daily = resample_ohlcv(df_5m, 'daily')
     if daily is None or len(daily) < 30:

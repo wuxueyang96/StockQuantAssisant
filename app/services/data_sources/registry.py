@@ -20,7 +20,7 @@ _SOURCES: dict[str, MarketDataSource] = {
 
 
 def active_data_source() -> MarketDataSource:
-    return _SOURCES.get(Config.DATA_SOURCE, _SOURCES['itick'])
+    return _SOURCES.get(Config.DATA_SOURCE, _SOURCES['akshare'])
 
 
 def _fallback_chain(primary: str, market: str) -> list[MarketDataSource]:
@@ -28,7 +28,7 @@ def _fallback_chain(primary: str, market: str) -> list[MarketDataSource]:
         'itick': ['itick', 'akshare', 'yfinance'],
         'akshare': ['akshare', 'yfinance'],
         'yfinance': ['yfinance'],
-    }.get(primary, ['itick', 'akshare', 'yfinance'])
+    }.get(primary, ['akshare', 'yfinance'])
     sources = []
     for name in order:
         source = _SOURCES[name]
