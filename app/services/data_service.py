@@ -8,6 +8,7 @@ import pandas as pd
 
 from app.config import Config
 from app.models.database import db_manager
+from app.services.data_sources.base import FetchRequest
 from app.services.resample import resample_ohlcv
 from app.services.stock_service import (
     MARKET_LABEL,
@@ -87,15 +88,51 @@ def _aggregate_api_budget(results: list[dict]) -> dict:
         return {}
     total_requests = sum(int(b.get('request_count') or 0) for b in budgets)
     free_mode = any(bool(b.get('free_mode')) for b in budgets)
+    strict = any(bool(b.get('strict')) for b in budgets)
+    window_count = sum(int(b.get('window_count') or 0) for b in budgets)
+    daily_request_count = sum(int(b.get('daily_request_count') or 0) for b in budgets)
     interval = max((float(b.get('min_interval_seconds') or 0) for b in budgets), default=0.0)
     estimated_seconds = max(0, total_requests - 1) * interval if free_mode else 0.0
-    return {
+    payload = {
         'data_source': budgets[0].get('data_source'),
         'free_mode': free_mode,
         'request_count': int(total_requests),
         'min_interval_seconds': interval if free_mode else 0.0,
         'estimated_seconds': estimated_seconds,
     }
+    if strict:
+        payload.update({
+            'strict': True,
+            'window_count': int(window_count),
+            'daily_request_count': int(daily_request_count),
+        })
+    return payload
+
+
+def _is_strict_akshare_source(source, market: str) -> bool:
+    return (
+        bool(Config.AKSHARE_STRICT_BACKFILL)
+        and getattr(source, 'name', None) == 'akshare'
+        and source.supports(market)
+        and hasattr(source, 'fetch_5m_strict')
+    )
+
+
+def _quality_warning(report: dict) -> Optional[str]:
+    if not report:
+        return None
+    parts = []
+    failed = report.get('failed_windows') or []
+    empty = report.get('empty_windows') or []
+    quality = report.get('quality_report') or {}
+    issue_count = int(quality.get('issue_count') or 0)
+    if failed:
+        parts.append(f"严格补数有 {len(failed)} 个窗口失败")
+    if empty:
+        parts.append(f"有 {len(empty)} 个窗口返回空数据")
+    if issue_count:
+        parts.append(f"质量校验发现 {issue_count} 个问题")
+    return '；'.join(parts) if parts else None
 
 
 def _base_record(market: str, stock_code: str) -> dict:
@@ -279,24 +316,50 @@ def backfill_market(
         effective_start = first_ts - pd.DateOffset(days=request_calendar_days)
         request_mode = 'backfill_before_first_timestamp'
 
-    fetch_history_days = None if explicit_window else requested_trading_days
-    df = fetch_stock_data(
-        market,
-        stock_code,
-        '5min',
-        history_days=fetch_history_days,
-        start_date=effective_start,
-        end_date=effective_end,
-    )
+    source = active_data_source()
+    strict_report = None
+    if _is_strict_akshare_source(source, market):
+        if not effective_end:
+            effective_end = pd.Timestamp.now()
+        if not effective_start:
+            effective_start = pd.Timestamp(effective_end) - pd.DateOffset(days=request_calendar_days)
+        strict_report = source.fetch_5m_strict(FetchRequest(
+            market=market,
+            stock_code=stock_code,
+            interval='5min',
+            start_date=effective_start,
+            end_date=effective_end,
+        ))
+        df = strict_report.get('df')
+        request_mode = f'{request_mode}_strict_chunks'
+        api_budget = {
+            **api_budget,
+            'request_count': int(strict_report.get('request_count') or 0),
+            'strict': True,
+            'window_count': int(strict_report.get('window_count') or 0),
+            'daily_request_count': int(strict_report.get('daily_request_count') or 0),
+        }
+    else:
+        fetch_history_days = None if explicit_window else requested_trading_days
+        df = fetch_stock_data(
+            market,
+            stock_code,
+            '5min',
+            history_days=fetch_history_days,
+            start_date=effective_start,
+            end_date=effective_end,
+        )
 
     if df is not None and not df.empty and not explicit_window:
-        before = effective_end if request_mode == 'backfill_before_first_timestamp' else None
+        before = effective_end if 'backfill_before_first_timestamp' in request_mode else None
         df = _trim_to_trading_days(df, requested_trading_days, before=before)
 
     # Some providers do not support arbitrary 5m start/end windows. Fall back to
     # the provider's recent-period mode so the user can still refresh/merge what
     # the source is willing to return instead of getting a hard empty response.
-    if (df is None or df.empty) and not explicit_window and request_mode == 'backfill_before_first_timestamp':
+    if (
+        df is None or df.empty
+    ) and not strict_report and not explicit_window and request_mode == 'backfill_before_first_timestamp':
         df = fetch_stock_data(
             market,
             stock_code,
@@ -323,10 +386,19 @@ def backfill_market(
             'no_data': True,
             'api_budget': api_budget,
         }
+        if strict_report:
+            no_data_payload.update({
+                'strict_backfill': True,
+                'strict_report': {
+                    k: v for k, v in strict_report.items() if k != 'df'
+                },
+                'quality_report': strict_report.get('quality_report') or {},
+                'warning': _quality_warning(strict_report),
+            })
         if int(record.get('rows') or 0) > 0:
             record.update({
                 **no_data_payload,
-                'warning': '数据源未返回更早的 5min 历史数据，已保留当前已有数据',
+                'warning': no_data_payload.get('warning') or '数据源未返回更早的 5min 历史数据，已保留当前已有数据',
             })
             return record
         record.update({
@@ -362,6 +434,21 @@ def backfill_market(
         'partial': bool(days and actual_days < requested_trading_days),
         **stats,
     })
+    if strict_report:
+        strict_payload = {k: v for k, v in strict_report.items() if k != 'df'}
+        after_record.update({
+            'strict_backfill': True,
+            'strict_report': strict_payload,
+            'quality_report': strict_report.get('quality_report') or {},
+            'partial': bool(
+                after_record.get('partial')
+                or strict_report.get('failed_windows')
+                or strict_report.get('empty_windows')
+            ),
+        })
+        warning = _quality_warning(strict_report)
+        if warning:
+            after_record['warning'] = warning
     return after_record
 
 

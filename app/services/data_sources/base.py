@@ -31,6 +31,17 @@ class MarketDataSource:
     def fetch_5m(self, request: FetchRequest) -> pd.DataFrame:
         raise NotImplementedError
 
+    def fetch_5m_strict(self, request: FetchRequest) -> dict:
+        df = self.fetch_5m(request)
+        return {
+            'df': df,
+            'data_source': self.name,
+            'strict': False,
+            'request_count': 1,
+            'windows': [],
+            'quality_report': {},
+        }
+
     def estimate_api_usage(
         self,
         market: str,

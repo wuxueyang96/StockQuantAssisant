@@ -187,7 +187,7 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 
 ### GET /stock/backfill-estimate
 
-估算补历史会消耗的数据源 API 请求次数，不会请求外部数据源。iTick 会返回分页、free mode 限速和预计秒数；其他数据源返回统一的预算结构。
+估算补历史会消耗的数据源 API 请求次数，不会请求外部数据源。`days` 表示交易日数量。默认 AkShare 严格模式会把交易日换算成保守自然日窗口，再按 `AKSHARE_BACKFILL_CHUNK_DAYS` 拆分请求；若开启日线校验，还会把 1 次日线校验请求计入总数。iTick 会返回分页、free mode 限速和预计秒数；其他数据源返回统一的预算结构。
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
@@ -201,17 +201,20 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
   "input": "300274",
   "count": 1,
   "api_budget": {
-    "free_mode": true,
-    "request_count": 10,
-    "min_interval_seconds": 13,
-    "estimated_seconds": 117
+    "data_source": "akshare",
+    "free_mode": false,
+    "strict": true,
+    "request_count": 12,
+    "window_count": 11,
+    "daily_request_count": 1,
+    "estimated_seconds": 0
   }
 }
 ```
 
 ### POST /stock/backfill
 
-为已注册股票补历史 5min 数据。该接口使用 upsert 合并，不受 `insert_data` 只写入 `latest` 之后数据的限制。
+为已注册股票补历史 5min 数据。该接口使用 upsert 合并，不受 `insert_data` 只写入 `latest` 之后数据的限制。默认 AkShare 严格模式会分窗口逐段请求，合并后去重、按交易日截断，并返回质量报告；如果某些窗口为空或失败，接口不会静默吞掉问题，而是在 `warning` / `strict_report` / `quality_report` 中说明。
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
@@ -221,7 +224,18 @@ API Base URL: `/api`，所有 API 响应为 JSON，包含 `success` 字段。内
 | `end_date` | string | 否 | — | 指定历史结束日期 |
 | `queued` | bool | 否 | false | 为 true 时创建后台数据任务并立即返回 `job_id` |
 
-返回字段包含 `requested_trading_days`、`request_calendar_days`、`inserted_rows`、`updated_rows`、`rows_before`、`rows_after`、`source_first_timestamp`、`source_last_timestamp`、`source_trading_days` 和 `partial`。
+返回字段包含 `requested_trading_days`、`request_calendar_days`、`inserted_rows`、`updated_rows`、`rows_before`、`rows_after`、`source_first_timestamp`、`source_last_timestamp`、`source_trading_days` 和 `partial`。AkShare 严格模式额外返回：
+
+| 字段 | 说明 |
+|------|------|
+| `strict_backfill` | 是否启用严格分窗口补数 |
+| `strict_report.request_count` | 总请求次数，包含分钟窗口请求和日线校验请求 |
+| `strict_report.minute_request_count` | 分钟数据窗口请求次数 |
+| `strict_report.daily_request_count` | 日线校验请求次数 |
+| `strict_report.window_count` / `completed_windows` | 分钟窗口总数与成功窗口数 |
+| `strict_report.failed_windows` / `empty_windows` | 失败或空返回窗口，最多返回前 50 个 |
+| `quality_report.minute` | 每个交易日 5min bar 数量检查；A 股默认期望 48 根 |
+| `quality_report.daily_check` | 将分钟聚合成日线后，与 AkShare 日线接口返回值对比 |
 
 ### GET /data-jobs/{job_id}
 

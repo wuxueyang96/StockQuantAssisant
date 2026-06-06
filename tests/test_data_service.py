@@ -3,6 +3,11 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def disable_strict_backfill_by_default(mocker):
+    mocker.patch('app.services.data_service.Config.AKSHARE_STRICT_BACKFILL', False)
+
+
 def _make_5min(n_days: int = 40, start: str = '2024-01-01') -> pd.DataFrame:
     dates = pd.bdate_range(start, periods=n_days)
     am = pd.timedelta_range(start='9:30:00', periods=24, freq='5min')
@@ -156,6 +161,67 @@ def test_backfill_empty_source_keeps_existing_data_as_warning(client, registered
     assert result['inserted_rows'] == 0
     assert result['updated_rows'] == 0
     assert result['rows_after'] == result['rows_before']
+
+
+def test_backfill_akshare_strict_chunks_returns_quality_report(client, registered_stock, mocker):
+    df = _make_5min(n_days=3, start='2023-12-25')
+    source = mocker.Mock(name='akshare', free_mode=False)
+    source.name = 'akshare'
+    source.supports.return_value = True
+    source.fetch_5m_strict.return_value = {
+        'df': df.set_index('timestamp'),
+        'data_source': 'akshare',
+        'strict': True,
+        'request_count': 3,
+        'minute_request_count': 2,
+        'daily_request_count': 1,
+        'window_count': 2,
+        'completed_windows': 2,
+        'failed_windows': [],
+        'empty_windows': [],
+        'windows': [],
+        'quality_report': {
+            'issue_count': 0,
+            'minute': {'issue_count': 0},
+            'daily_check': {'checked': True, 'issue_count': 0},
+        },
+    }
+    mocker.patch('app.services.data_service.Config.AKSHARE_STRICT_BACKFILL', True)
+    mocker.patch('app.services.data_service.active_data_source', return_value=source)
+
+    resp = client.post('/api/stock/backfill', json={'stock': '000001', 'days': 30})
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    result = resp.get_json()['results'][0]
+    assert result['strict_backfill'] is True
+    assert result['strict_report']['request_count'] == 3
+    assert result['api_budget']['daily_request_count'] == 1
+    assert result['quality_report']['issue_count'] == 0
+    assert result['request_mode'] == 'backfill_before_first_timestamp_strict_chunks'
+    source.fetch_5m_strict.assert_called_once()
+    request = source.fetch_5m_strict.call_args.args[0]
+    assert request.market == 'a'
+    assert request.stock_code == '000001'
+    assert request.start_date is not None
+    assert request.end_date is not None
+
+
+def test_backfill_estimate_akshare_strict_aggregate_includes_window_counts(client, mocker):
+    mocker.patch('app.services.data_service.Config.AKSHARE_STRICT_BACKFILL', True)
+    mocker.patch('app.services.data_service.Config.AKSHARE_DAILY_CHECK', True)
+    mocker.patch('app.services.data_service.Config.AKSHARE_BACKFILL_CHUNK_DAYS', 30)
+
+    resp = client.get('/api/stock/backfill-estimate?stock=300274&days=200')
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    payload = resp.get_json()
+    assert payload['api_budget']['strict'] is True
+    assert payload['api_budget']['request_count'] == 12
+    assert payload['api_budget']['window_count'] == 11
+    assert payload['api_budget']['daily_request_count'] == 1
+    detail = payload['results'][0]['api_budget']
+    assert detail['request_count'] == 12
+    assert detail['window_count'] == 11
 
 
 def test_refresh_unregistered_returns_error(client):

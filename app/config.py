@@ -1,6 +1,13 @@
 import os
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def _get_data_dir():
     env = os.environ.get('STOCKQUANT_DATA_DIR')
     if env:
@@ -20,6 +27,16 @@ class Config:
     METADATA_DB_PATH = os.path.join(DATA_DIR, 'metadata.db')
 
     DATA_SOURCE = os.environ.get('STOCKQUANT_DATA_SOURCE', 'akshare').lower()
+    AKSHARE_STRICT_BACKFILL = _env_bool('AKSHARE_STRICT_BACKFILL', True)
+    AKSHARE_BACKFILL_CHUNK_DAYS = int(os.environ.get('AKSHARE_BACKFILL_CHUNK_DAYS', '30'))
+    AKSHARE_BACKFILL_RETRIES = int(os.environ.get('AKSHARE_BACKFILL_RETRIES', '2'))
+    AKSHARE_BACKFILL_RETRY_SLEEP_SECONDS = float(os.environ.get('AKSHARE_BACKFILL_RETRY_SLEEP_SECONDS', '1.0'))
+    AKSHARE_BACKFILL_CHUNK_DELAY_SECONDS = float(os.environ.get('AKSHARE_BACKFILL_CHUNK_DELAY_SECONDS', '0.2'))
+    AKSHARE_DAILY_CHECK = _env_bool('AKSHARE_DAILY_CHECK', True)
+    AKSHARE_DAILY_PRICE_TOLERANCE = float(os.environ.get('AKSHARE_DAILY_PRICE_TOLERANCE', '0.03'))
+    AKSHARE_DAILY_VOLUME_REL_TOLERANCE = float(os.environ.get('AKSHARE_DAILY_VOLUME_REL_TOLERANCE', '0.05'))
+    AKSHARE_EXPECTED_A_5MIN_BARS = int(os.environ.get('AKSHARE_EXPECTED_A_5MIN_BARS', '48'))
+    AKSHARE_EXPECTED_HK_5MIN_BARS = int(os.environ.get('AKSHARE_EXPECTED_HK_5MIN_BARS', '66'))
     ITICK_TOKEN = os.environ.get('ITICK_TOKEN') or os.environ.get('ITICK_API_KEY')
     ITICK_BASE_URL = os.environ.get('ITICK_BASE_URL', 'https://api-free.itick.org/stock')
     ITICK_PAGE_LIMIT = int(os.environ.get('ITICK_PAGE_LIMIT', '1000'))

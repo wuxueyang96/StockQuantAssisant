@@ -50,6 +50,7 @@ StockQuantAssisant 是一个基于 Python + Flask 的股票数据采集、量化
 | `INTERVAL_MINUTES` | 周期 → 分钟数（供 resample 使用） |
 | `RESAMPLE_INTERVALS` | 运行时合成支持的目标周期 |
 | `DATA_SOURCE` / `ITICK_TOKEN` / `ITICK_BASE_URL` | 主数据源选择；默认 AkShare，iTick token 通过环境变量注入 |
+| `AKSHARE_STRICT_BACKFILL` / `AKSHARE_BACKFILL_CHUNK_DAYS` / `AKSHARE_DAILY_CHECK` | AkShare 补历史严格模式、分窗口大小和日线校验开关 |
 | `ITICK_FREE_MIN_INTERVAL_SECONDS` / `ITICK_FREE_REFRESH_LIMIT` | iTick 固定免费额度限速与单页刷新配置 |
 | `YFINANCE_TICKER_MAP` | 市场 → yfinance ticker 转换函数（兜底用） |
 | `TRADING_HOURS` | 各市场交易时段和时区 |
@@ -101,6 +102,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 - `FetchRequest`：市场、代码、周期、历史窗口、分页上限等请求参数。
 - `MarketDataSource.fetch_5m(request)`：返回标准 OHLCV DataFrame。
+- `MarketDataSource.fetch_5m_strict(request)`：严格补历史入口，默认包装一次 `fetch_5m`；AkShare 实现会分窗口抓取、重试、合并去重并输出质量报告。
 - `MarketDataSource.estimate_api_usage(...)`：返回统一 API 预算结构。
 - `registry.fetch_5m`：按 `STOCKQUANT_DATA_SOURCE` 选择主源并执行 fallback。
 
@@ -108,11 +110,11 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 
 | 数据源 | 文件 | 覆盖市场 | 说明 |
 |--------|------|----------|------|
-| akshare | `akshare_source.py` | A / HK | 默认主数据源；适合免费拉取 A 股 / 港股 5min 研究数据 |
+| akshare | `akshare_source.py` | A / HK | 默认主数据源；补历史默认启用严格分窗口、分钟条数检查和日线聚合校验 |
 | iTick | `itick.py` | A / HK / US | 可选源；支持分页、固定免费额度限速和请求预算 |
 | yfinance | `yfinance_source.py` | A / HK / US | 最后兜底；5min 历史窗口受 Yahoo 限制 |
 
-**数据源策略**：业务层只依赖 `MarketDataSource` 接口，所有源都输出标准 5min OHLCV。60min / 90min / 120min / daily 由 `resample` 运行时合成。默认顺序为 akshare → yfinance；显式设置 `STOCKQUANT_DATA_SOURCE=itick` 时才使用 iTick，并在 token 缺失或请求失败时回退 akshare / yfinance。
+**数据源策略**：业务层只依赖 `MarketDataSource` 接口，所有源都输出标准 5min OHLCV。60min / 90min / 120min / daily 由 `resample` 运行时合成。默认顺序为 akshare → yfinance；显式设置 `STOCKQUANT_DATA_SOURCE=itick` 时才使用 iTick，并在 token 缺失或请求失败时回退 akshare / yfinance。AkShare 的补历史接口默认走 `fetch_5m_strict`，`days` 被解释为交易日数量，并换算成保守自然日窗口后拆分请求；返回结果会报告空窗口、失败窗口、每日 5min bar 数和日线校验差异。
 
 #### registration_service.py
 
@@ -137,7 +139,7 @@ Flask Blueprint `api_bp`，挂载 `/api` 前缀。根路径 `/` 渲染内置前�
 - `get_data_status` — 返回本地 5min 数据行数、起止时间、日线数量和注册状态。
 - `refresh_data` — 面向已注册股票，拉取最近小窗口并通过 `insert_data` 增量写入。
 - `refresh_all_registered` — 强制刷新所有已录入代码映射且已注册的股票。
-- `backfill_data` — 面向已注册股票，拉取指定历史窗口并通过 `upsert_data` 合并补齐旧数据。
+- `backfill_data` — 面向已注册股票，拉取指定历史窗口并通过 `upsert_data` 合并补齐旧数据；默认 AkShare 严格模式会附带 `strict_report` 和 `quality_report`。
 
 #### resample.py
 

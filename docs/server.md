@@ -88,7 +88,8 @@ s3://{bucket}/
 
 - `POST /api/stock/refresh`：刷新单个已注册股票。
 - `POST /api/refresh`：刷新所有已录入且已注册的股票。
-- `POST /api/stock/backfill`：补历史数据，按 timestamp upsert 合并。
+- `POST /api/stock/backfill`：补历史数据，按 timestamp upsert 合并；`days` 表示交易日数量。
+- 默认 AkShare 补历史启用严格模式：先把交易日换算为保守自然日窗口，再按 `AKSHARE_BACKFILL_CHUNK_DAYS` 分段请求，最后返回窗口执行情况、分钟条数检查和日线校验报告。
 - iTick 固定按免费额度限速；AkShare / yfinance 由数据源自身限制决定。
 - 高周期 K 线由 `app/services/resample.py` 合成：按交易日分组、按日内 K 线序号切桶，不跨日合并。
 - 90min 最后一根不足 18 根 5min 时标记 `partial_bar=true`，默认只用于展示，不参与结构交易确认。

@@ -1,3 +1,6 @@
+import sys
+import types
+
 import pytest
 import pandas as pd
 from app.services.stock_service import (
@@ -268,6 +271,88 @@ class TestITickSource:
 
         assert mock_request.call_count == 1
         assert mock_request.call_args.kwargs['limit'] == 1000
+
+
+class TestAkshareSource:
+    def test_strict_fetch_chunks_and_checks_daily(self, mocker):
+        from app.services.data_sources.akshare_source import AkshareDataSource
+        from app.services.data_sources.base import FetchRequest
+
+        def minute_df(symbol, period, start_date, end_date, adjust):
+            rows = []
+            for day in pd.bdate_range(start_date[:10], end_date[:10]):
+                rows.append({
+                    '时间': f'{day.date()} 09:30:00',
+                    '开盘': 10.0,
+                    '最高': 10.5,
+                    '最低': 9.8,
+                    '收盘': 10.2,
+                    '成交量': 10,
+                })
+                rows.append({
+                    '时间': f'{day.date()} 09:35:00',
+                    '开盘': 10.2,
+                    '最高': 11.0,
+                    '最低': 10.1,
+                    '收盘': 10.8,
+                    '成交量': 20,
+                })
+            return pd.DataFrame(rows)
+
+        def daily_df(symbol, period, start_date, end_date, adjust):
+            return pd.DataFrame([{
+                '日期': str(day.date()),
+                '开盘': 10.0,
+                '最高': 11.0,
+                '最低': 9.8,
+                '收盘': 10.8,
+                '成交量': 30,
+            } for day in pd.bdate_range(start_date, end_date)])
+
+        fake_ak = types.SimpleNamespace(
+            stock_zh_a_hist_min_em=minute_df,
+            stock_zh_a_hist=daily_df,
+        )
+        mocker.patch.dict(sys.modules, {'akshare': fake_ak})
+        mocker.patch('app.services.data_sources.akshare_source.is_available', return_value=True)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_BACKFILL_CHUNK_DAYS', 3)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_BACKFILL_RETRIES', 0)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_BACKFILL_CHUNK_DELAY_SECONDS', 0)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_EXPECTED_A_5MIN_BARS', 2)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_DAILY_CHECK', True)
+
+        report = AkshareDataSource().fetch_5m_strict(FetchRequest(
+            market='a',
+            stock_code='000001',
+            start_date='2024-01-01',
+            end_date='2024-01-10 15:00:00',
+        ))
+
+        assert report['strict'] is True
+        assert report['window_count'] > 1
+        assert report['minute_request_count'] == report['window_count']
+        assert report['daily_request_count'] == 1
+        assert report['request_count'] == report['window_count'] + 1
+        assert report['completed_windows'] == report['window_count']
+        assert not report['df'].empty
+        assert report['quality_report']['minute']['issue_count'] == 0
+        assert report['quality_report']['daily_check']['checked'] is True
+        assert report['quality_report']['daily_check']['request_count'] == 1
+        assert report['quality_report']['daily_check']['issue_count'] == 0
+
+    def test_estimate_api_usage_counts_strict_chunks_and_daily_check(self, mocker):
+        from app.services.data_sources.akshare_source import AkshareDataSource
+
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_STRICT_BACKFILL', True)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_DAILY_CHECK', True)
+        mocker.patch('app.services.data_sources.akshare_source.Config.AKSHARE_BACKFILL_CHUNK_DAYS', 30)
+
+        estimate = AkshareDataSource().estimate_api_usage('a', trading_days=200)
+
+        assert estimate['strict'] is True
+        assert estimate['window_count'] == 11
+        assert estimate['daily_request_count'] == 1
+        assert estimate['request_count'] == 12
 
 
 class TestInitialHistoryWindow:

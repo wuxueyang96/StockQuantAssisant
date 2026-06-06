@@ -119,6 +119,15 @@ python run.py start --host 0.0.0.0 --port 5000
 | `OSS_ACCESS_KEY_ID` | Access Key（不设使用 IAM 角色） | — |
 | `OSS_ACCESS_KEY_SECRET` | Secret Key | — |
 | `STOCKQUANT_DATA_SOURCE` | 主数据源，可选 `akshare` / `itick` / `yfinance`；当前默认 AkShare | `akshare` |
+| `AKSHARE_STRICT_BACKFILL` | AkShare 补历史是否启用分窗口严格模式 | `true` |
+| `AKSHARE_BACKFILL_CHUNK_DAYS` | AkShare 严格补数的单个请求自然日窗口 | `30` |
+| `AKSHARE_BACKFILL_RETRIES` | AkShare 单窗口失败后的重试次数 | `2` |
+| `AKSHARE_BACKFILL_RETRY_SLEEP_SECONDS` | AkShare 单窗口重试等待秒数 | `1.0` |
+| `AKSHARE_BACKFILL_CHUNK_DELAY_SECONDS` | AkShare 窗口之间的等待秒数 | `0.2` |
+| `AKSHARE_DAILY_CHECK` | AkShare 补历史后是否用日线数据校验分钟聚合结果 | `true` |
+| `AKSHARE_DAILY_PRICE_TOLERANCE` | 分钟聚合日线与日线接口价格允许误差 | `0.03` |
+| `AKSHARE_DAILY_VOLUME_REL_TOLERANCE` | 分钟聚合日线与日线接口成交量相对误差阈值 | `0.05` |
+| `AKSHARE_EXPECTED_A_5MIN_BARS` / `AKSHARE_EXPECTED_HK_5MIN_BARS` | 每个交易日最低预期 5min bar 数量 | `48` / `66` |
 | `ITICK_TOKEN` / `ITICK_API_KEY` | iTick API token | — |
 | `ITICK_BASE_URL` | iTick 股票 REST 地址；免费体验可用 `https://api-free.itick.org/stock`，生产可设 `https://api.itick.org/stock` | `https://api-free.itick.org/stock` |
 | `ITICK_PAGE_LIMIT` | iTick 单页 K 线条数 | `1000` |
@@ -144,7 +153,7 @@ python3 e2e/test_parquet.py --minio # Parquet on OSS E2E（需 MinIO）
 - 支持 A 股 / 港股 / 美股三市场，代码或名称输入
 - 名称自动匹配多市场（如"阿里巴巴"→ 港股 09988.HK + 美股 BABA.US）
 - 每个股票注册一个 5min 数据表，高周期通过运行时重采样生成
-- 默认使用 AkShare 拉取 5min 数据；美股会 fallback 到 yfinance
+- 默认使用 AkShare 拉取 5min 数据；补历史时按自然日分窗口逐段请求，并用日线数据校验分钟聚合结果；美股会 fallback 到 yfinance
 - iTick 仍可通过 `STOCKQUANT_DATA_SOURCE=itick` 启用，并固定按免费额度限速
 - 注册只保存标的，不自动拉取历史；数据完全通过“刷新数据”或“补历史数据”手动维护
 - 已注册股票持久化，服务重启自动恢复
@@ -210,9 +219,9 @@ http://127.0.0.1:5000/
 已注册股票支持两类手动数据维护：
 
 - **刷新最新数据**：`POST /api/stock/refresh`，拉取最近小窗口并只写入最新增量；`POST /api/refresh` 可批量刷新所有已录入且已注册的股票。
-- **补历史数据**：`POST /api/stock/backfill`，`days` 表示向前补的交易日数量；系统会换算为更大的自然日请求窗口，再按实际交易日截断并按 timestamp upsert 合并。
+- **补历史数据**：`POST /api/stock/backfill`，`days` 表示向前补的交易日数量；系统会换算为更大的自然日请求窗口。默认 AkShare 严格模式会按 `AKSHARE_BACKFILL_CHUNK_DAYS` 拆成多个请求，合并去重后按实际交易日截断，并返回窗口执行情况、分钟条数检查和日线校验报告。
 
-注意：iTick 会返回每个市场常规交易时段内的 5min K 线；A 股可能包含开盘集合/开盘 K，系统会保留常规时段数据并由重采样层处理尾部 partial bar。未配置 iTick token 或 iTick 请求失败时，系统会回退到 akshare / yfinance，其中 yfinance 5m 常限制最近 60 天。
+注意：AkShare 是免费数据源，分钟历史能否完整返回取决于 AkShare 与其上游接口；严格模式会尽量慢速分段请求并把空窗口、失败窗口和校验差异明确返回。iTick 会返回每个市场常规交易时段内的 5min K 线；A 股可能包含开盘集合/开盘 K，系统会保留常规时段数据并由重采样层处理尾部 partial bar。未配置 iTick token 或 iTick 请求失败时，系统会回退到 akshare / yfinance，其中 yfinance 5m 常限制最近 60 天。
 
 ## 数据存储
 

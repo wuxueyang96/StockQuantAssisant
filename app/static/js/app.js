@@ -71,6 +71,11 @@ function fmtDuration(seconds) {
 function apiBudgetText(budget) {
   if (!budget) return '--';
   const requests = fmt(budget.request_count, '0');
+  if (budget.strict && budget.window_count) {
+    const daily = Number(budget.daily_request_count || 0);
+    const dailyText = daily ? ` + 日线 ${daily} 次` : '';
+    return `${requests} 次 / ${fmt(budget.window_count, '0')} 窗口${dailyText}`;
+  }
   const suffix = budget.free_mode ? ` / 约 ${fmtDuration(budget.estimated_seconds)}` : '';
   return `${requests} 次${suffix}`;
 }
@@ -323,6 +328,17 @@ function renderDataStatus(result) {
     if (result.updated_rows !== undefined) rows.push(['覆盖行', result.updated_rows]);
     if (result.source_trading_days !== undefined) rows.push(['源交易日', result.source_trading_days]);
     if (result.partial !== undefined) rows.push(['部分返回', result.partial]);
+    if (result.strict_backfill) {
+      const report = result.strict_report || {};
+      const quality = result.quality_report || report.quality_report || {};
+      const minute = quality.minute || {};
+      const daily = quality.daily_check || {};
+      rows.push(['严格补数', 'AkShare 分窗口']);
+      rows.push(['请求窗口', `${fmt(report.completed_windows, '0')}/${fmt(report.window_count, '0')}`]);
+      rows.push(['请求次数', report.request_count]);
+      rows.push(['分钟缺口', minute.issue_count || 0]);
+      rows.push(['日线校验', daily.checked ? `${daily.issue_count || 0} 个问题` : (daily.error || '--')]);
+    }
     if (result.warning) rows.push(['提示', result.warning]);
   }
   renderKV('dataStatusList', rows);
