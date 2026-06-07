@@ -12,6 +12,7 @@ from app.algos.integrated_decision import (
     INTRADAY_STRUCTURE_INTERVALS,
     evaluate_integrated_dataframe,
 )
+from app.algos.structure import compute_structure_event_study
 from app.models.database import db_manager
 from app.schemas.backtest import (
     BacktestConfig,
@@ -57,6 +58,66 @@ def _frames_from_5min(df_5m: pd.DataFrame) -> tuple[pd.DataFrame, Dict[str, pd.D
         if dfi is not None and len(dfi) >= 30:
             intraday[interval] = dfi
     return daily, intraday
+
+
+def _warmup_bars(config: BacktestConfig, strategy_config: StrategyConfig) -> int:
+    if config.warmup_bars is not None:
+        return max(0, int(config.warmup_bars))
+    return max(360, int(strategy_config.long_period) * 4)
+
+
+def _first_index_on_or_after(daily: pd.DataFrame, start: pd.Timestamp) -> int:
+    for i, ts in enumerate(daily.index):
+        if _local_day(ts) >= start:
+            return i
+    return len(daily)
+
+
+def _slice_intraday_from(
+    intraday: Dict[str, pd.DataFrame],
+    data_start: pd.Timestamp,
+) -> Dict[str, pd.DataFrame]:
+    out: Dict[str, pd.DataFrame] = {}
+    for interval, df_i in intraday.items():
+        if df_i is None or df_i.empty:
+            continue
+        mask = pd.Series(
+            [_local_day(ts) >= data_start for ts in df_i.index],
+            index=df_i.index,
+        )
+        sub = df_i.loc[mask]
+        if len(sub) >= 30:
+            out[interval] = sub
+    return out
+
+
+def _merge_event_studies(studies: list[dict]) -> dict:
+    merged = {
+        'by_event': {},
+        'grouped_by_trend_state': {},
+        'grouped_by_timeframe': {},
+    }
+    for study in studies:
+        if not study:
+            continue
+        for section in merged:
+            for key, value in study.get(section, {}).items():
+                existing = merged[section].setdefault(key, {'count': 0})
+                count_a = int(existing.get('count', 0))
+                count_b = int(value.get('count', 0))
+                total = count_a + count_b
+                if total <= 0:
+                    continue
+                for metric, metric_value in value.items():
+                    if metric == 'count':
+                        continue
+                    prev = float(existing.get(metric, 0.0))
+                    existing[metric] = _round(
+                        (prev * count_a + float(metric_value) * count_b) / total,
+                        6,
+                    )
+                existing['count'] = total
+    return merged
 
 
 def _date_or_none(value) -> Optional[pd.Timestamp]:
@@ -105,6 +166,7 @@ def _strategy_config_from_backtest(config: BacktestConfig) -> StrategyConfig:
     return StrategyConfig(
         enable_trend=bool(config.enable_trend),
         enable_structure=bool(config.enable_structure),
+        enable_structure_position_adjustment=bool(config.enable_structure_position_adjustment),
         enable_sequence=bool(config.enable_sequence),
         enable_execution_rules=bool(config.enable_execution_rules),
     )
@@ -169,6 +231,8 @@ def _build_signals(
             'order_delta': _round(row.get('order_delta'), 4),
             'confidence_label': row.get('confidence_label'),
             'trend_state': row.get('trend_state'),
+            'primary_regime': row.get('primary_regime'),
+            'tactical_state': row.get('tactical_state'),
             'structure_adjustment': _round(row.get('structure_adjustment'), 4),
             'sequence_adjustment': _round(row.get('sequence_adjustment'), 4),
             'signal_reason': row.get('decision_reason') or '',
@@ -179,6 +243,11 @@ def _build_signals(
             'target_reversal_warning': row.get('target_reversal_warning') or '',
             'high9_active': bool(row.get('high9_active', False)),
             'low9_active': bool(row.get('low9_active', False)),
+            'long_mid_prev': _round(row.get('long_mid_prev'), 4),
+            'long_mid_slope': _round(row.get('long_mid_slope'), 8),
+            'short_mid_prev': _round(row.get('short_mid_prev'), 4),
+            'short_mid_slope': _round(row.get('short_mid_slope'), 8),
+            'previous_20_high': _round(row.get('previous_20_high'), 4),
         })
     return rows
 
@@ -416,13 +485,20 @@ def _compute_metrics(
     down_capture_ratio = 0.0
     cumulative_allocation_drag = 0.0
     missed_upside_return = 0.0
+    fixed_same_average_position_total_return = 0.0
+    timing_alpha_vs_fixed_same_position = 0.0
     target_flip_count = 0
     count_10_to_4 = 0
     count_4_to_10 = 0
     below_60_long_up_days = 0
+    below_60_bull_days = 0
+    below_80_long_mid_up_days = 0
     structure_reduction_days = 0
     sequence_reduction_days = 0
     trend_distribution: Dict[str, int] = {}
+    position_bucket_attribution: Dict[str, Dict[str, float]] = {}
+    trend_state_attribution: Dict[str, Dict[str, float]] = {}
+    trend_regime_attribution: Dict[str, Dict[str, float]] = {}
 
     if daily is not None and sim_indices is not None and len(sim_indices) == len(equity_curve):
         close = pd.Series(
@@ -433,6 +509,11 @@ def _compute_metrics(
         aligned_strategy_returns = returns.iloc[1:]
         aligned_benchmark_returns = benchmark_returns.iloc[1:]
         aligned_positions = position_series.iloc[1:]
+        fixed_equity = (1.0 + aligned_benchmark_returns.fillna(0.0) * avg_position).prod()
+        fixed_same_average_position_total_return = float(fixed_equity - 1.0)
+        timing_alpha_vs_fixed_same_position = float(
+            total_return - fixed_same_average_position_total_return
+        )
 
         up_mask = aligned_benchmark_returns > 0
         down_mask = aligned_benchmark_returns < 0
@@ -458,6 +539,32 @@ def _compute_metrics(
             ((1.0 - prev_positions).clip(lower=0.0) * bench_no_na.clip(lower=0.0)).sum()
         )
 
+        attr_df = pd.DataFrame({
+            'strategy_return': aligned_strategy_returns.reset_index(drop=True),
+            'benchmark_return': aligned_benchmark_returns.reset_index(drop=True),
+            'position': aligned_positions.reset_index(drop=True),
+        }).dropna(subset=['strategy_return', 'benchmark_return'])
+        if not attr_df.empty:
+            buckets = [
+                (0.0, 0.2, '0-20%'),
+                (0.2, 0.4, '20-40%'),
+                (0.4, 0.6, '40-60%'),
+                (0.6, 0.8, '60-80%'),
+                (0.8, 1.01, '80-100%'),
+            ]
+            for lo, hi, label in buckets:
+                if hi >= 1.0:
+                    mask = (attr_df['position'] >= lo) & (attr_df['position'] <= 1.0)
+                else:
+                    mask = (attr_df['position'] >= lo) & (attr_df['position'] < hi)
+                sub = attr_df.loc[mask]
+                position_bucket_attribution[label] = {
+                    'days': int(len(sub)),
+                    'avg_position': _round(float(sub['position'].mean()) if len(sub) else 0.0, 6),
+                    'strategy_return': _round(float(sub['strategy_return'].sum()) if len(sub) else 0.0, 6),
+                    'benchmark_return': _round(float(sub['benchmark_return'].sum()) if len(sub) else 0.0, 6),
+                }
+
         if decisions is not None and not decisions.empty:
             decision_window = decisions.reindex(daily.index).iloc[sim_indices]
             trend_states = decision_window.get('trend_state', pd.Series(index=decision_window.index, dtype='object'))
@@ -467,6 +574,51 @@ def _compute_metrics(
             }
             long_up = trend_states.isin(['UP_STRONG', 'UP_PULLBACK', 'UP_WEAK'])
             below_60_long_up_days = int(((position_series < 0.6).values & long_up.fillna(False).values).sum())
+            primary_regime = decision_window.get(
+                'primary_regime',
+                pd.Series(index=decision_window.index, dtype='object'),
+            ).fillna('UNKNOWN')
+            below_60_bull_days = int(
+                ((position_series < 0.6).values & primary_regime.eq('BULL').values).sum()
+            )
+            long_mid_prev = pd.to_numeric(
+                decision_window.get('long_mid_prev', pd.Series(index=decision_window.index)),
+                errors='coerce',
+            )
+            long_mid_slope = pd.to_numeric(
+                decision_window.get('long_mid_slope', pd.Series(index=decision_window.index)),
+                errors='coerce',
+            )
+            close_window = pd.to_numeric(daily['Close'].reindex(decision_window.index), errors='coerce')
+            long_mid_up_mask = (
+                close_window.gt(long_mid_prev)
+                & long_mid_slope.gt(0)
+            ).fillna(False)
+            below_80_long_mid_up_days = int(
+                ((position_series < 0.8).values & long_mid_up_mask.values).sum()
+            )
+
+            attr_with_state = attr_df.copy() if 'attr_df' in locals() else pd.DataFrame()
+            if not attr_with_state.empty:
+                trend_aligned = trend_states.iloc[1:].reset_index(drop=True).fillna('UNKNOWN')
+                regime_aligned = primary_regime.iloc[1:].reset_index(drop=True).fillna('UNKNOWN')
+                attr_with_state['trend_state'] = trend_aligned.loc[attr_with_state.index].values
+                attr_with_state['primary_regime'] = regime_aligned.loc[attr_with_state.index].values
+
+                for state, sub in attr_with_state.groupby('trend_state'):
+                    trend_state_attribution[str(state)] = {
+                        'days': int(len(sub)),
+                        'avg_position': _round(float(sub['position'].mean()), 6),
+                        'strategy_return': _round(float(sub['strategy_return'].sum()), 6),
+                        'benchmark_return': _round(float(sub['benchmark_return'].sum()), 6),
+                    }
+                for regime, sub in attr_with_state.groupby('primary_regime'):
+                    trend_regime_attribution[str(regime)] = {
+                        'days': int(len(sub)),
+                        'avg_position': _round(float(sub['position'].mean()), 6),
+                        'strategy_return': _round(float(sub['strategy_return'].sum()), 6),
+                        'benchmark_return': _round(float(sub['benchmark_return'].sum()), 6),
+                    }
             structure_adj = pd.to_numeric(
                 decision_window.get('structure_adjustment', pd.Series(index=decision_window.index)),
                 errors='coerce',
@@ -508,13 +660,20 @@ def _compute_metrics(
         cumulative_allocation_drag=_round(cumulative_allocation_drag, 6),
         cumulative_cost_drag=_round(cost_drag_value / initial_cash if initial_cash > 0 else 0.0, 6),
         missed_upside_return=_round(missed_upside_return, 6),
+        fixed_same_average_position_total_return=_round(fixed_same_average_position_total_return, 6),
+        timing_alpha_vs_fixed_same_position=_round(timing_alpha_vs_fixed_same_position, 6),
         target_flip_count=target_flip_count,
         count_10_to_4=count_10_to_4,
         count_4_to_10=count_4_to_10,
         days_position_below_60pct_when_long_trend_up=below_60_long_up_days,
+        days_position_below_60pct_when_bull=below_60_bull_days,
+        days_position_below_80pct_when_close_above_long_mid=below_80_long_mid_up_days,
         structure_caused_reduction_days=structure_reduction_days,
         sequence_caused_reduction_days=sequence_reduction_days,
         trend_state_days_distribution=trend_distribution,
+        position_bucket_attribution=position_bucket_attribution,
+        trend_state_attribution=trend_state_attribution,
+        trend_regime_attribution=trend_regime_attribution,
         exposure=_round(float(np.mean([p > 0.01 for p in positions])) if positions else 0.0, 6),
         turnover=_round(turnover_value / avg_equity if avg_equity > 0 else 0.0, 6),
         benchmark_total_return=_round(benchmark_return, 6),
@@ -536,23 +695,80 @@ def run_backtest_for_market(
     if daily is None or len(daily) < int(config.min_bars):
         raise ValueError(f'5min 数据不足以合成回测日线（至少需要 {config.min_bars} 根日线）')
 
+    strategy_config = _strategy_config_from_backtest(config)
+    warmup_bars = _warmup_bars(config, strategy_config)
+    requested_start = _date_or_none(config.start_date)
+    if requested_start is not None:
+        start_pos = _first_index_on_or_after(daily, requested_start)
+        if start_pos >= len(daily):
+            raise ValueError('回测起始日期晚于本地数据范围')
+        data_pos = max(0, start_pos - warmup_bars)
+    else:
+        start_pos = warmup_bars if len(daily) > warmup_bars + 1 else 0
+        data_pos = 0
+
+    daily_for_signals = daily.iloc[data_pos:].copy()
+    if daily_for_signals is None or len(daily_for_signals) < int(config.min_bars):
+        raise ValueError(f'warm-up 后日线数据不足（至少需要 {config.min_bars} 根日线）')
+    data_start_ts = pd.Timestamp(daily_for_signals.index[0])
+    backtest_start_ts = pd.Timestamp(daily.index[start_pos])
+    available_warmup = max(0, start_pos - data_pos)
+    if available_warmup >= warmup_bars:
+        effective_signal_start_ts = backtest_start_ts
+    else:
+        effective_pos = min(warmup_bars, len(daily_for_signals) - 1)
+        effective_signal_start_ts = pd.Timestamp(daily_for_signals.index[effective_pos])
+
+    intraday_for_signals = _slice_intraday_from(
+        intraday,
+        _local_day(data_start_ts),
+    )
+
     if config.enable_trend:
         decisions = evaluate_integrated_dataframe(
-            daily,
-            intraday,
-            config=_strategy_config_from_backtest(config),
+            daily_for_signals,
+            intraday_for_signals,
+            config=strategy_config,
         )
     else:
-        decisions = _buy_hold_decisions(daily)
-    result = simulate_backtest(daily, decisions, config)
+        decisions = _buy_hold_decisions(daily_for_signals)
+    result = simulate_backtest(daily_for_signals, decisions, config)
     payload = result.to_api_dict()
+    trend_state_by_day = {
+        _local_day(idx): str(row.get('trend_state') or 'UNKNOWN')
+        for idx, row in decisions.iterrows()
+    }
+    event_studies = [
+        compute_structure_event_study(
+            daily_for_signals,
+            timeframe='daily',
+            trend_state_by_day=trend_state_by_day,
+            config=strategy_config,
+        )
+    ]
+    for interval, df_i in intraday_for_signals.items():
+        event_studies.append(
+            compute_structure_event_study(
+                df_i,
+                timeframe=interval,
+                trend_state_by_day=trend_state_by_day,
+                config=strategy_config,
+            )
+        )
     payload.update({
         'market': market,
         'market_label': MARKET_LABEL[market],
         'stock_code': stock_code,
         'display_code': format_stock_code(market, stock_code),
         'interval': 'integrated',
-        'bars': len(daily),
+        'bars': len(daily_for_signals),
+        'data_start': _to_iso(data_start_ts),
+        'backtest_start': _to_iso(backtest_start_ts),
+        'warmup_bars': warmup_bars,
+        'available_warmup_bars': available_warmup,
+        'effective_signal_start': _to_iso(effective_signal_start_ts),
+        'backtest_bars': len(result.equity_curve),
+        'structure_event_study': _merge_event_studies(event_studies),
     })
     return payload
 

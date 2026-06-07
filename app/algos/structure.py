@@ -28,6 +28,7 @@ from app.algos.config import (
     STRUCTURE_RESONANCE_INTERVALS,
     StrategyConfig,
     StructureBias,
+    StructureState,
     TrendState,
     _STRUCTURE_ENUM_SCORE,
 )
@@ -135,7 +136,10 @@ class MACDStructure:
         # 数据不够直接返回
         min_bars = max(self.slow + self.signal + 2, 2)
         if n < min_bars:
-            return result
+            return append_structure_state_machine(
+                result,
+                horizon_bars=self.effective_horizon,
+            )
 
         H = result['High'].values
         L = result['Low'].values
@@ -243,7 +247,10 @@ class MACDStructure:
                 eff_until_series.append(idx[j])
         result['structure_effective_until'] = eff_until_series
 
-        return result
+        return append_structure_state_machine(
+            result,
+            horizon_bars=self.effective_horizon,
+        )
 
     # ------------------------------------------------------------------ top step
     def _step_top(self, i, h, d, a, prev_d, prev_a, result,
@@ -462,6 +469,343 @@ def _event_direction(enum_val: str) -> Optional[str]:
     if enum_val.startswith('bottom'):
         return 'bottom'
     return None
+
+
+def append_structure_state_machine(
+    df: pd.DataFrame,
+    *,
+    horizon_bars: int = 5,
+    timeframe: str = '',
+    short_period: int = 26,
+    pivot_lookback: int = 5,
+) -> pd.DataFrame:
+    """Append first-stage structure state-machine diagnostics.
+
+    The state columns are diagnostic only in phase 1. They do not imply a
+    position adjustment unless a later layer explicitly consumes them.
+    """
+    result = df.copy()
+    n = len(result)
+    for col in (
+        'top_structure_state', 'bottom_structure_state', 'structure_state',
+        'top_structure_state_event', 'bottom_structure_state_event',
+        'structure_event', 'structure_event_direction',
+        'structure_event_timeframe',
+    ):
+        result[col] = (
+            timeframe if col == 'structure_event_timeframe'
+            else ('none' if col.endswith('event') or col in ('structure_event', 'structure_event_direction') else StructureState.NONE.value)
+        )
+    result['top_structure_warning_at'] = pd.Series([pd.NaT] * n, index=result.index, dtype='object')
+    result['bottom_structure_warning_at'] = pd.Series([pd.NaT] * n, index=result.index, dtype='object')
+    result['top_structure_reference_high'] = np.nan
+    result['top_structure_pivot_low'] = np.nan
+    result['bottom_structure_reference_low'] = np.nan
+    result['bottom_structure_pivot_high'] = np.nan
+
+    if n == 0:
+        return result
+
+    high = pd.to_numeric(result.get('High'), errors='coerce')
+    low = pd.to_numeric(result.get('Low'), errors='coerce')
+    close = pd.to_numeric(result.get('Close'), errors='coerce')
+    pivot_low = low.shift(1).rolling(pivot_lookback, min_periods=1).min()
+    pivot_high = high.shift(1).rolling(pivot_lookback, min_periods=1).max()
+    short_mid_prev = (
+        (high.rolling(short_period, min_periods=1).max()
+         + low.rolling(short_period, min_periods=1).min()) / 2.0
+    ).shift(1)
+
+    top_active: Optional[dict] = None
+    bottom_active: Optional[dict] = None
+    horizon = max(1, int(horizon_bars or 1))
+
+    for i, idx in enumerate(result.index):
+        c = close.iloc[i]
+        h = high.iloc[i]
+        l = low.iloc[i]
+        sm = short_mid_prev.iloc[i]
+        top_event = 'none'
+        bottom_event = 'none'
+
+        if top_active is not None and i > top_active['start_i']:
+            age = i - top_active['start_i']
+            confirmed = (
+                (pd.notna(c) and pd.notna(top_active['pivot_low']) and c < top_active['pivot_low'])
+                or (pd.notna(c) and pd.notna(sm) and c < sm)
+            )
+            failed = (
+                (pd.notna(h) and pd.notna(top_active['reference_high']) and h > top_active['reference_high'])
+                or (pd.notna(c) and pd.notna(top_active['reference_high']) and c > top_active['reference_high'])
+            )
+            expired = age >= horizon
+            if confirmed:
+                result.at[idx, 'top_structure_state'] = StructureState.CONFIRMED.value
+                top_event = 'TOP_CONFIRMED'
+                top_active = None
+            elif failed or (expired and pd.notna(c) and c > top_active['warning_close']):
+                result.at[idx, 'top_structure_state'] = StructureState.FAILED.value
+                top_event = 'TOP_FAILED'
+                top_active = None
+            elif expired:
+                result.at[idx, 'top_structure_state'] = StructureState.EXPIRED.value
+                top_event = 'TOP_EXPIRED'
+                top_active = None
+            else:
+                result.at[idx, 'top_structure_state'] = StructureState.WARNING.value
+                result.at[idx, 'top_structure_warning_at'] = top_active['warning_at']
+                result.at[idx, 'top_structure_reference_high'] = top_active['reference_high']
+                result.at[idx, 'top_structure_pivot_low'] = top_active['pivot_low']
+
+        top_warning = (
+            bool(result.at[idx, 'top_divergence']) if 'top_divergence' in result.columns else False
+        ) or (
+            bool(result.at[idx, 'top_structure_75']) if 'top_structure_75' in result.columns else False
+        ) or (
+            bool(result.at[idx, 'top_structure_100']) if 'top_structure_100' in result.columns else False
+        )
+        if top_active is None and top_event == 'none' and top_warning:
+            ref_high = h if pd.notna(h) else c
+            top_active = {
+                'start_i': i,
+                'warning_at': idx,
+                'warning_close': c,
+                'reference_high': ref_high,
+                'pivot_low': pivot_low.iloc[i],
+            }
+            result.at[idx, 'top_structure_state'] = StructureState.WARNING.value
+            result.at[idx, 'top_structure_warning_at'] = idx
+            result.at[idx, 'top_structure_reference_high'] = ref_high
+            result.at[idx, 'top_structure_pivot_low'] = pivot_low.iloc[i]
+            top_event = 'TOP_WARNING'
+
+        if bottom_active is not None and i > bottom_active['start_i']:
+            age = i - bottom_active['start_i']
+            confirmed = (
+                (pd.notna(c) and pd.notna(bottom_active['pivot_high']) and c > bottom_active['pivot_high'])
+                or (pd.notna(c) and pd.notna(sm) and c > sm)
+            )
+            failed = (
+                (pd.notna(l) and pd.notna(bottom_active['reference_low']) and l < bottom_active['reference_low'])
+                or (pd.notna(c) and pd.notna(bottom_active['reference_low']) and c < bottom_active['reference_low'])
+            )
+            expired = age >= horizon
+            if confirmed:
+                result.at[idx, 'bottom_structure_state'] = StructureState.CONFIRMED.value
+                bottom_event = 'BOTTOM_CONFIRMED'
+                bottom_active = None
+            elif failed:
+                result.at[idx, 'bottom_structure_state'] = StructureState.FAILED.value
+                bottom_event = 'BOTTOM_FAILED'
+                bottom_active = None
+            elif expired:
+                result.at[idx, 'bottom_structure_state'] = StructureState.EXPIRED.value
+                bottom_event = 'BOTTOM_EXPIRED'
+                bottom_active = None
+            else:
+                result.at[idx, 'bottom_structure_state'] = StructureState.WARNING.value
+                result.at[idx, 'bottom_structure_warning_at'] = bottom_active['warning_at']
+                result.at[idx, 'bottom_structure_reference_low'] = bottom_active['reference_low']
+                result.at[idx, 'bottom_structure_pivot_high'] = bottom_active['pivot_high']
+
+        bottom_warning = (
+            bool(result.at[idx, 'bottom_divergence']) if 'bottom_divergence' in result.columns else False
+        ) or (
+            bool(result.at[idx, 'bottom_structure_75']) if 'bottom_structure_75' in result.columns else False
+        ) or (
+            bool(result.at[idx, 'bottom_structure_100']) if 'bottom_structure_100' in result.columns else False
+        )
+        if bottom_active is None and bottom_event == 'none' and bottom_warning:
+            ref_low = l if pd.notna(l) else c
+            bottom_active = {
+                'start_i': i,
+                'warning_at': idx,
+                'warning_close': c,
+                'reference_low': ref_low,
+                'pivot_high': pivot_high.iloc[i],
+            }
+            result.at[idx, 'bottom_structure_state'] = StructureState.WARNING.value
+            result.at[idx, 'bottom_structure_warning_at'] = idx
+            result.at[idx, 'bottom_structure_reference_low'] = ref_low
+            result.at[idx, 'bottom_structure_pivot_high'] = pivot_high.iloc[i]
+            bottom_event = 'BOTTOM_WARNING'
+
+        if top_event != 'none':
+            result.at[idx, 'top_structure_state_event'] = top_event
+        if bottom_event != 'none':
+            result.at[idx, 'bottom_structure_state_event'] = bottom_event
+
+        events = [e for e in (top_event, bottom_event) if e != 'none']
+        if len(events) == 1:
+            result.at[idx, 'structure_event'] = events[0]
+            result.at[idx, 'structure_event_direction'] = events[0].split('_', 1)[0]
+            result.at[idx, 'structure_state'] = events[0].split('_', 1)[1]
+        elif len(events) > 1:
+            result.at[idx, 'structure_event'] = '|'.join(events)
+            result.at[idx, 'structure_event_direction'] = 'CONFLICT'
+            result.at[idx, 'structure_state'] = 'CONFLICT'
+
+    return result
+
+
+def _round_stat(value: float) -> float:
+    if value is None or pd.isna(value):
+        return 0.0
+    return round(float(value), 6)
+
+
+def _aggregate_event_records(records: List[dict]) -> dict:
+    if not records:
+        return {
+            'count': 0,
+            'forward_return_1d': 0.0,
+            'forward_return_3d': 0.0,
+            'forward_return_5d': 0.0,
+            'forward_return_10d': 0.0,
+            'forward_return_20d': 0.0,
+            'max_favorable_excursion': 0.0,
+            'max_adverse_excursion': 0.0,
+            'confirm_rate': 0.0,
+            'fail_rate': 0.0,
+            'expired_rate': 0.0,
+        }
+    out = {'count': len(records)}
+    for key in (
+        'forward_return_1d', 'forward_return_3d', 'forward_return_5d',
+        'forward_return_10d', 'forward_return_20d',
+        'max_favorable_excursion', 'max_adverse_excursion',
+    ):
+        vals = [r[key] for r in records if r.get(key) is not None and not pd.isna(r.get(key))]
+        out[key] = _round_stat(float(np.mean(vals)) if vals else 0.0)
+    out['confirm_rate'] = _round_stat(np.mean([1.0 if r.get('outcome') == 'CONFIRMED' else 0.0 for r in records]))
+    out['fail_rate'] = _round_stat(np.mean([1.0 if r.get('outcome') == 'FAILED' else 0.0 for r in records]))
+    out['expired_rate'] = _round_stat(np.mean([1.0 if r.get('outcome') == 'EXPIRED' else 0.0 for r in records]))
+    return out
+
+
+def _group_event_records(records: List[dict], group_key: str) -> dict:
+    grouped: Dict[str, List[dict]] = {}
+    for record in records:
+        key = str(record.get(group_key) or 'UNKNOWN')
+        grouped.setdefault(key, []).append(record)
+    return {k: _aggregate_event_records(v) for k, v in sorted(grouped.items())}
+
+
+def compute_structure_event_study(
+    df: pd.DataFrame,
+    *,
+    timeframe: str = 'daily',
+    trend_state_by_day: Optional[Dict[pd.Timestamp, str]] = None,
+    config: StrategyConfig = DEFAULT_CONFIG,
+    structure: Optional[MACDStructure] = None,
+) -> dict:
+    """Study forward returns after structure state-machine events."""
+    if df is None or df.empty:
+        return {
+            'by_event': {},
+            'grouped_by_trend_state': {},
+            'grouped_by_timeframe': {},
+        }
+
+    evaluator = structure or MACDStructure(effective_horizon=config.structure_event_horizon_bars)
+    ev = evaluator.evaluate(df)
+    ev = append_structure_state_machine(
+        ev,
+        horizon_bars=config.structure_event_horizon_bars,
+        timeframe=timeframe,
+        short_period=config.short_period,
+    )
+    close = pd.to_numeric(ev['Close'], errors='coerce')
+    high = pd.to_numeric(ev['High'], errors='coerce')
+    low = pd.to_numeric(ev['Low'], errors='coerce')
+    horizons = (1, 3, 5, 10, 20)
+    records: List[dict] = []
+
+    for i, idx in enumerate(ev.index):
+        raw_events = str(ev.iloc[i].get('structure_event') or 'none')
+        if raw_events == 'none':
+            continue
+        for event_name in raw_events.split('|'):
+            if event_name == 'none' or event_name.endswith('_EXPIRED'):
+                continue
+            if not (
+                event_name.endswith('_WARNING')
+                or event_name.endswith('_CONFIRMED')
+                or event_name.endswith('_FAILED')
+            ):
+                continue
+            side, event_state = event_name.split('_', 1)
+            entry = close.iloc[i]
+            if pd.isna(entry) or entry == 0:
+                continue
+            record = {
+                'event': event_name,
+                'side': side,
+                'event_state': event_state,
+                'timeframe': timeframe,
+                'trend_state': 'UNKNOWN',
+                'outcome': event_state,
+                'date': pd.Timestamp(idx).isoformat(),
+            }
+            if trend_state_by_day:
+                day = pd.Timestamp(idx).normalize()
+                record['trend_state'] = str(trend_state_by_day.get(day, 'UNKNOWN'))
+            if event_state == 'WARNING':
+                outcome = 'EXPIRED'
+                max_j = min(len(ev) - 1, i + int(config.structure_event_horizon_bars))
+                prefix = f'{side}_'
+                for j in range(i + 1, max_j + 1):
+                    candidate = str(ev.iloc[j].get('structure_event') or 'none')
+                    if f'{prefix}CONFIRMED' in candidate:
+                        outcome = 'CONFIRMED'
+                        break
+                    if f'{prefix}FAILED' in candidate:
+                        outcome = 'FAILED'
+                        break
+                    if f'{prefix}EXPIRED' in candidate:
+                        outcome = 'EXPIRED'
+                        break
+                record['outcome'] = outcome
+
+            for horizon in horizons:
+                j = i + horizon
+                key = f'forward_return_{horizon}d'
+                record[key] = (
+                    float(close.iloc[j] / entry - 1.0)
+                    if j < len(close) and pd.notna(close.iloc[j]) else np.nan
+                )
+            max_j = min(len(ev), i + 21)
+            future_high = high.iloc[i + 1:max_j]
+            future_low = low.iloc[i + 1:max_j]
+            if side == 'TOP':
+                record['max_favorable_excursion'] = (
+                    float(entry / future_low.min() - 1.0)
+                    if len(future_low.dropna()) else np.nan
+                )
+                record['max_adverse_excursion'] = (
+                    float(entry / future_high.max() - 1.0)
+                    if len(future_high.dropna()) else np.nan
+                )
+            else:
+                record['max_favorable_excursion'] = (
+                    float(future_high.max() / entry - 1.0)
+                    if len(future_high.dropna()) else np.nan
+                )
+                record['max_adverse_excursion'] = (
+                    float(future_low.min() / entry - 1.0)
+                    if len(future_low.dropna()) else np.nan
+                )
+            records.append(record)
+
+    by_event: Dict[str, List[dict]] = {}
+    for record in records:
+        by_event.setdefault(record['event'], []).append(record)
+
+    return {
+        'by_event': {k: _aggregate_event_records(v) for k, v in sorted(by_event.items())},
+        'grouped_by_trend_state': _group_event_records(records, 'trend_state'),
+        'grouped_by_timeframe': _group_event_records(records, 'timeframe'),
+    }
 
 
 def _top_structure_enum_from_row(row: pd.Series) -> str:

@@ -251,7 +251,14 @@ def _apply_itick_free_rate_limit():
         _itick_next_request_at = time.monotonic() + min_interval
 
 
-def _itick_request(region: str, code: str, *, et: int = None, limit: int = None) -> dict:
+def _itick_request(
+    region: str,
+    code: str,
+    *,
+    et: int = None,
+    limit: int = None,
+    k_type: str = '2',
+) -> dict:
     token = Config.ITICK_TOKEN
     if not token:
         raise RuntimeError('未配置 ITICK_TOKEN 或 ITICK_API_KEY')
@@ -259,7 +266,7 @@ def _itick_request(region: str, code: str, *, et: int = None, limit: int = None)
     query = {
         'region': region,
         'code': code,
-        'kType': '2',
+        'kType': str(k_type),
         'limit': str(int(limit or Config.ITICK_PAGE_LIMIT)),
     }
     if et is not None:
@@ -347,6 +354,112 @@ def _normalize_itick_kline(items, market: str) -> pd.DataFrame:
     )
 
 
+def _normalize_itick_daily_kline(items, market: str) -> pd.DataFrame:
+    if not items:
+        return pd.DataFrame()
+    rows = []
+    for item in items:
+        ts = item.get('t')
+        if ts is None:
+            continue
+        rows.append({
+            'Date': pd.to_datetime(int(ts), unit='ms', utc=True).tz_convert(_market_tz(market)),
+            'Open': item.get('o'),
+            'High': item.get('h'),
+            'Low': item.get('l'),
+            'Close': item.get('c'),
+            'Volume': item.get('v', 0),
+        })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).dropna(subset=['Open', 'High', 'Low', 'Close'])
+    if df.empty:
+        return pd.DataFrame()
+    df = df.drop_duplicates(subset=['Date'], keep='last').sort_values('Date')
+    df = df.set_index('Date')
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df.dropna(subset=['Open', 'High', 'Low', 'Close'])
+
+
+def _fetch_itick_daily_reference(
+    region: str,
+    code: str,
+    market: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    days = max(1, int((end.normalize() - start.normalize()).days) + 1)
+    limit = max(30, min(1000, days + 10))
+    et = int(end.tz_convert('UTC').timestamp() * 1000)
+    payload = _itick_request(region, code, et=et, limit=limit, k_type='8')
+    daily = _normalize_itick_daily_kline(payload.get('data') or [], market)
+    if daily.empty:
+        return pd.DataFrame()
+    return daily[(daily.index >= start.normalize()) & (daily.index <= end)]
+
+
+def _validate_itick_against_daily(
+    df: pd.DataFrame,
+    region: str,
+    code: str,
+    market: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> None:
+    if not Config.ITICK_DAILY_CHECK or df is None or df.empty:
+        return
+
+    daily = _fetch_itick_daily_reference(region, code, market, start, end)
+    if daily.empty:
+        return
+
+    minute_daily = df.copy()
+    minute_daily.index = pd.to_datetime(minute_daily.index)
+    minute_daily['trade_date'] = minute_daily.index.date
+    minute_daily = minute_daily.groupby('trade_date').agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Volume': 'sum',
+    })
+    minute_daily.index = pd.to_datetime(minute_daily.index)
+
+    price_tol = float(Config.ITICK_DAILY_PRICE_TOLERANCE)
+    volume_tol = float(Config.ITICK_DAILY_VOLUME_REL_TOLERANCE)
+    issues = []
+    daily_by_date = {pd.Timestamp(idx).date(): row for idx, row in daily.iterrows()}
+    daily_dates = set(daily_by_date)
+    minute_dates = {pd.Timestamp(x).date() for x in minute_daily.index}
+    for day in sorted(daily_dates & minute_dates):
+        daily_row = daily_by_date[day]
+        minute_row = minute_daily.loc[pd.Timestamp(day)]
+        for col in ('Open', 'High', 'Low', 'Close'):
+            dv = daily_row.get(col)
+            mv = minute_row.get(col)
+            if pd.isna(dv) or pd.isna(mv):
+                continue
+            if abs(float(dv) - float(mv)) > price_tol:
+                issues.append(
+                    f"{day} {col}: daily={float(dv):.4f} minute={float(mv):.4f}"
+                )
+        dv = daily_row.get('Volume')
+        mv = minute_row.get('Volume')
+        if pd.notna(dv) and pd.notna(mv):
+            base = max(abs(float(dv)), 1.0)
+            rel = abs(float(dv) - float(mv)) / base
+            if rel > volume_tol:
+                issues.append(
+                    f"{day} Volume: daily={float(dv):.0f} minute={float(mv):.0f} rel={rel:.2%}"
+                )
+        if len(issues) >= 8:
+            break
+
+    if issues:
+        raise RuntimeError('iTick 5min 与 daily 校验不一致: ' + '; '.join(issues))
+
+
 def _fetch_5m_itick(market: str, stock_code: str, history_days: int = None,
                     start_date=None, end_date=None, *, max_pages: int = None,
                     limit: int = None) -> pd.DataFrame:
@@ -363,7 +476,7 @@ def _fetch_5m_itick(market: str, stock_code: str, history_days: int = None,
     logger.info(f"iTick 拉取: region={region} code={code} interval=5m rows≈{target_rows}")
 
     all_items = []
-    et = int(end.tz_convert('UTC').timestamp() * 1000)
+    et = int((end + pd.Timedelta(minutes=5)).tz_convert('UTC').timestamp() * 1000)
     seen_ts = set()
     for _ in range(max_pages):
         try:
@@ -405,6 +518,7 @@ def _fetch_5m_itick(market: str, stock_code: str, history_days: int = None,
         logger.warning(f"iTick 返回空数据: {region}/{code}")
         return df
     df = df[(df.index >= start) & (df.index <= end)]
+    _validate_itick_against_daily(df, region, code, market, start, end)
     logger.info(f"iTick 获取 {region}/{code} 数据 {len(df)} 行")
     return df
 

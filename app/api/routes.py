@@ -434,9 +434,9 @@ def stock_backtest():
 
     allowed = {
         'start_date', 'end_date', 'initial_cash', 'commission_rate',
-        'slippage_bps', 'min_bars', 'lot_size', 'benchmark',
-        'enable_trend', 'enable_structure', 'enable_sequence',
-        'enable_execution_rules',
+        'slippage_bps', 'min_bars', 'warmup_bars', 'lot_size', 'benchmark',
+        'enable_trend', 'enable_structure', 'enable_structure_position_adjustment',
+        'enable_sequence', 'enable_execution_rules',
     }
     kwargs = {k: data[k] for k in allowed if k in data}
 
@@ -445,10 +445,12 @@ def stock_backtest():
         kwargs['commission_rate'] = float(kwargs.get('commission_rate', 0.0003))
         kwargs['slippage_bps'] = float(kwargs.get('slippage_bps', 5.0))
         kwargs['min_bars'] = int(kwargs.get('min_bars', 90))
+        if kwargs.get('warmup_bars') not in (None, ''):
+            kwargs['warmup_bars'] = int(kwargs['warmup_bars'])
         kwargs['lot_size'] = int(kwargs.get('lot_size', 1))
         for key in (
-            'enable_trend', 'enable_structure', 'enable_sequence',
-            'enable_execution_rules',
+            'enable_trend', 'enable_structure', 'enable_structure_position_adjustment',
+            'enable_sequence', 'enable_execution_rules',
         ):
             if key in kwargs:
                 kwargs[key] = _parse_bool(kwargs[key])

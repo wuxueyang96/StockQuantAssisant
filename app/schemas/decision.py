@@ -11,10 +11,15 @@ class TrendKeyLines:
     short_lower_prev: Optional[float] = None
     long_upper_prev: Optional[float] = None
     long_lower_prev: Optional[float] = None
+    short_mid_prev: Optional[float] = None
+    long_mid_prev: Optional[float] = None
+    previous_20_high: Optional[float] = None
     short_upper_current: Optional[float] = None
     short_lower_current: Optional[float] = None
     long_upper_current: Optional[float] = None
     long_lower_current: Optional[float] = None
+    short_mid_current: Optional[float] = None
+    long_mid_current: Optional[float] = None
 
 
 @dataclass
@@ -32,6 +37,8 @@ class TrendContext:
     position_cap: float
     position_floor: float
     previous_position: Optional[float]
+    primary_regime: str = 'UNKNOWN'
+    tactical_state: str = 'NORMAL'
     key_lines: TrendKeyLines = field(default_factory=TrendKeyLines)
     quality: TrendQuality = field(default_factory=TrendQuality)
     reason: str = ''

@@ -186,6 +186,7 @@ class TestITickSource:
         mocker.patch.object(stock_service.Config, 'ITICK_TOKEN', 'token')
         mocker.patch.object(stock_service.Config, 'ITICK_PAGE_LIMIT', 1000)
         mocker.patch.object(stock_service.Config, 'ITICK_MAX_PAGES', 2)
+        mocker.patch.object(stock_service.Config, 'ITICK_DAILY_CHECK', False)
         mock_request = mocker.patch.object(stock_service, '_itick_request', return_value={
             'code': 0,
             'data': [
@@ -214,6 +215,7 @@ class TestITickSource:
         mocker.patch.object(stock_service.Config, 'ITICK_TOKEN', 'token')
         mocker.patch.object(stock_service.Config, 'ITICK_PAGE_LIMIT', 1000)
         mocker.patch.object(stock_service.Config, 'ITICK_MAX_PAGES', 2)
+        mocker.patch.object(stock_service.Config, 'ITICK_DAILY_CHECK', False)
         mock_request = mocker.patch.object(stock_service, '_itick_request', side_effect=[
             {
                 'code': 0,
@@ -253,6 +255,7 @@ class TestITickSource:
 
         t1 = int(pd.Timestamp('2024-01-02T01:35:00Z').timestamp() * 1000)
         mocker.patch.object(stock_service.Config, 'ITICK_TOKEN', 'token')
+        mocker.patch.object(stock_service.Config, 'ITICK_DAILY_CHECK', False)
         mock_request = mocker.patch.object(stock_service, '_itick_request', return_value={
             'code': 0,
             'data': [
@@ -271,6 +274,136 @@ class TestITickSource:
 
         assert mock_request.call_count == 1
         assert mock_request.call_args.kwargs['limit'] == 1000
+
+    def test_fetch_5m_itick_requests_next_bar_after_end(self, mocker):
+        from app.services import stock_service
+
+        t1 = int(pd.Timestamp('2024-01-02T01:35:00Z').timestamp() * 1000)
+        expected_et = t1 + 5 * 60 * 1000
+        mocker.patch.object(stock_service.Config, 'ITICK_TOKEN', 'token')
+        mocker.patch.object(stock_service.Config, 'ITICK_DAILY_CHECK', False)
+        mock_request = mocker.patch.object(stock_service, '_itick_request', return_value={
+            'code': 0,
+            'data': [
+                {'t': t1, 'o': 10.0, 'h': 10.4, 'l': 9.9, 'c': 10.2, 'v': 100},
+            ],
+        })
+
+        stock_service._fetch_5m_itick(
+            'a',
+            '300274',
+            start_date='2024-01-02 09:30:00',
+            end_date='2024-01-02 09:35:00',
+            max_pages=1,
+            limit=1000,
+        )
+
+        assert mock_request.call_args.kwargs['et'] == expected_et
+
+    def test_fetch_5m_itick_rejects_daily_mismatch(self, mocker):
+        from app.services import stock_service
+
+        day = int(pd.Timestamp('2024-01-02T00:00:00Z').timestamp() * 1000)
+        t1 = int(pd.Timestamp('2024-01-02T01:35:00Z').timestamp() * 1000)
+        t2 = int(pd.Timestamp('2024-01-02T01:40:00Z').timestamp() * 1000)
+        mocker.patch.object(stock_service.Config, 'ITICK_TOKEN', 'token')
+        mocker.patch.object(stock_service.Config, 'ITICK_DAILY_CHECK', True)
+        mocker.patch.object(stock_service.Config, 'ITICK_DAILY_PRICE_TOLERANCE', 0.03)
+        mocker.patch.object(stock_service.Config, 'ITICK_DAILY_VOLUME_REL_TOLERANCE', 0.05)
+        mock_request = mocker.patch.object(stock_service, '_itick_request', side_effect=[
+            {
+                'code': 0,
+                'data': [
+                    {'t': t2, 'o': 10.2, 'h': 10.5, 'l': 10.1, 'c': 10.3, 'v': 200},
+                    {'t': t1, 'o': 10.0, 'h': 10.4, 'l': 9.9, 'c': 10.2, 'v': 100},
+                ],
+            },
+            {
+                'code': 0,
+                'data': [
+                    {'t': day, 'o': 11.0, 'h': 11.2, 'l': 9.8, 'c': 10.3, 'v': 300},
+                ],
+            },
+        ])
+
+        with pytest.raises(RuntimeError, match='iTick 5min 与 daily 校验不一致'):
+            stock_service._fetch_5m_itick(
+                'a',
+                '300274',
+                start_date='2024-01-02 09:30:00',
+                end_date='2024-01-02 15:00:00',
+                max_pages=1,
+                limit=1000,
+            )
+
+        assert mock_request.call_count == 2
+        assert mock_request.call_args_list[1].kwargs['k_type'] == '8'
+
+    def test_itick_datasource_requests_next_bar_after_end(self, mocker):
+        from app.services.data_sources.base import FetchRequest
+        from app.services.data_sources.itick import ITickDataSource
+
+        t1 = int(pd.Timestamp('2024-01-02T01:35:00Z').timestamp() * 1000)
+        expected_et = t1 + 5 * 60 * 1000
+        source = ITickDataSource()
+        mocker.patch('app.services.data_sources.itick.Config.ITICK_DAILY_CHECK', False)
+        mock_request = mocker.patch.object(source, 'request', return_value={
+            'code': 0,
+            'data': [
+                {'t': t1, 'o': 10.0, 'h': 10.4, 'l': 9.9, 'c': 10.2, 'v': 100},
+            ],
+        })
+
+        source.fetch_5m(FetchRequest(
+            market='a',
+            stock_code='300274',
+            start_date='2024-01-02 09:30:00',
+            end_date='2024-01-02 09:35:00',
+            max_pages=1,
+            limit=1000,
+        ))
+
+        assert mock_request.call_args.kwargs['et'] == expected_et
+
+    def test_itick_datasource_rejects_daily_mismatch(self, mocker):
+        from app.services.data_sources.base import FetchRequest
+        from app.services.data_sources.itick import ITickDataSource
+
+        day = int(pd.Timestamp('2024-01-02T00:00:00Z').timestamp() * 1000)
+        t1 = int(pd.Timestamp('2024-01-02T01:35:00Z').timestamp() * 1000)
+        t2 = int(pd.Timestamp('2024-01-02T01:40:00Z').timestamp() * 1000)
+        source = ITickDataSource()
+        mocker.patch('app.services.data_sources.itick.Config.ITICK_DAILY_CHECK', True)
+        mocker.patch('app.services.data_sources.itick.Config.ITICK_DAILY_PRICE_TOLERANCE', 0.03)
+        mocker.patch('app.services.data_sources.itick.Config.ITICK_DAILY_VOLUME_REL_TOLERANCE', 0.05)
+        mock_request = mocker.patch.object(source, 'request', side_effect=[
+            {
+                'code': 0,
+                'data': [
+                    {'t': t2, 'o': 10.2, 'h': 10.5, 'l': 10.1, 'c': 10.3, 'v': 200},
+                    {'t': t1, 'o': 10.0, 'h': 10.4, 'l': 9.9, 'c': 10.2, 'v': 100},
+                ],
+            },
+            {
+                'code': 0,
+                'data': [
+                    {'t': day, 'o': 11.0, 'h': 11.2, 'l': 9.8, 'c': 10.3, 'v': 300},
+                ],
+            },
+        ])
+
+        with pytest.raises(RuntimeError, match='iTick 5min 与 daily 校验不一致'):
+            source.fetch_5m(FetchRequest(
+                market='a',
+                stock_code='300274',
+                start_date='2024-01-02 09:30:00',
+                end_date='2024-01-02 15:00:00',
+                max_pages=1,
+                limit=1000,
+            ))
+
+        assert mock_request.call_count == 2
+        assert mock_request.call_args_list[1].kwargs['k_type'] == '8'
 
 
 class TestAkshareSource:

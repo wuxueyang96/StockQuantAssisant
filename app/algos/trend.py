@@ -10,7 +10,13 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from app.algos.config import DEFAULT_CONFIG, StrategyConfig, TrendState
+from app.algos.config import (
+    DEFAULT_CONFIG,
+    PrimaryRegime,
+    StrategyConfig,
+    TacticalState,
+    TrendState,
+)
 
 
 def _mid_channel(upper: float, lower: float) -> float:
@@ -73,6 +79,84 @@ def compute_channels(df: pd.DataFrame, config: StrategyConfig = DEFAULT_CONFIG) 
     return result
 
 
+def _legacy_trend_state(
+    primary_regime: PrimaryRegime,
+    tactical_state: TacticalState,
+) -> TrendState:
+    """Map the new two-level trend model onto the legacy API enum."""
+    if primary_regime == PrimaryRegime.BULL:
+        if tactical_state == TacticalState.ACCELERATION:
+            return TrendState.UP_STRONG
+        if tactical_state == TacticalState.WEAK:
+            return TrendState.UP_WEAK
+        return TrendState.UP_PULLBACK
+    if primary_regime == PrimaryRegime.NEUTRAL:
+        return TrendState.RANGE
+    if primary_regime == PrimaryRegime.BEAR:
+        if tactical_state == TacticalState.REBOUND:
+            return TrendState.DOWN_REBOUND
+        return TrendState.DOWN_STRONG
+    return TrendState.UNKNOWN
+
+
+def classify_trend_components(
+    close: float,
+    short_upper_prev: float,
+    short_lower_prev: float,
+    long_upper_prev: float,
+    long_lower_prev: float,
+    short_mid_prev: float = np.nan,
+    long_mid_prev: float = np.nan,
+    short_mid_slope: float = np.nan,
+    long_mid_slope: float = np.nan,
+    previous_20_high: float = np.nan,
+) -> Tuple[PrimaryRegime, TacticalState, TrendState]:
+    """根据 T 日收盘价与 T-1 轨线判定趋势核心状态（无未来函数）。"""
+    vals = (short_upper_prev, short_lower_prev, long_upper_prev, long_lower_prev)
+    if any(pd.isna(v) for v in vals) or pd.isna(close):
+        return PrimaryRegime.UNKNOWN, TacticalState.NORMAL, TrendState.UNKNOWN
+
+    has_long_mid = pd.notna(long_mid_prev) and pd.notna(long_mid_slope)
+    has_short_mid = pd.notna(short_mid_prev) and pd.notna(short_mid_slope)
+    long_mid_up = has_long_mid and close > long_mid_prev and long_mid_slope > 0
+    long_mid_down = has_long_mid and close < long_mid_prev and long_mid_slope <= 0
+    hard_down = (
+        close < long_lower_prev
+        or (close < short_lower_prev and pd.notna(long_mid_prev) and close < long_mid_prev)
+    )
+
+    if long_mid_up:
+        primary = PrimaryRegime.BULL
+    elif hard_down or (long_mid_down and (not has_short_mid or close < short_mid_prev)):
+        primary = PrimaryRegime.BEAR
+    else:
+        primary = PrimaryRegime.NEUTRAL
+
+    if primary == PrimaryRegime.BULL:
+        breakout_20 = pd.notna(previous_20_high) and close > previous_20_high
+        short_mid_up = has_short_mid and close > short_mid_prev and short_mid_slope > 0
+        if breakout_20:
+            tactical = TacticalState.ACCELERATION
+        elif short_mid_up:
+            tactical = TacticalState.NORMAL
+        elif pd.notna(short_mid_prev) and close < short_mid_prev:
+            tactical = TacticalState.PULLBACK
+        else:
+            tactical = TacticalState.WEAK
+    elif primary == PrimaryRegime.BEAR:
+        rebound = (
+            (has_short_mid and close > short_mid_prev and short_mid_slope > 0)
+            or close > short_upper_prev
+        )
+        tactical = TacticalState.REBOUND if rebound else TacticalState.RISK
+    elif primary == PrimaryRegime.NEUTRAL:
+        tactical = TacticalState.NORMAL
+    else:
+        tactical = TacticalState.NORMAL
+
+    return primary, tactical, _legacy_trend_state(primary, tactical)
+
+
 def classify_trend_state(
     close: float,
     short_upper_prev: float,
@@ -83,67 +167,44 @@ def classify_trend_state(
     long_mid_prev: float = np.nan,
     short_mid_slope: float = np.nan,
     long_mid_slope: float = np.nan,
+    previous_20_high: float = np.nan,
 ) -> TrendState:
-    """根据 T 日收盘价与 T-1 轨线判定趋势状态（**无未来函数**）。"""
-    vals = (short_upper_prev, short_lower_prev, long_upper_prev, long_lower_prev)
-    if any(pd.isna(v) for v in vals) or pd.isna(close):
-        return TrendState.UNKNOWN
-
-    if close > short_upper_prev and close > long_upper_prev:
-        return TrendState.UP_STRONG
-    if close < short_lower_prev and close < long_lower_prev:
-        return TrendState.DOWN_STRONG
-
-    long_mid_up = (
-        pd.notna(long_mid_prev)
-        and pd.notna(long_mid_slope)
-        and close > long_mid_prev
-        and long_mid_slope > 0
+    """兼容旧调用：返回 legacy trend_state。"""
+    _, _, state = classify_trend_components(
+        close,
+        short_upper_prev,
+        short_lower_prev,
+        long_upper_prev,
+        long_lower_prev,
+        short_mid_prev=short_mid_prev,
+        long_mid_prev=long_mid_prev,
+        short_mid_slope=short_mid_slope,
+        long_mid_slope=long_mid_slope,
+        previous_20_high=previous_20_high,
     )
-    emerging_up = (
-        pd.notna(long_mid_prev)
-        and pd.notna(short_mid_slope)
-        and close > long_mid_prev
-        and close > short_upper_prev
-        and short_mid_slope > 0
-    )
-    if close < short_lower_prev and (close > long_upper_prev or long_mid_up):
-        return TrendState.UP_PULLBACK
-
-    if long_mid_up or emerging_up:
-        if pd.notna(short_mid_prev) and close >= short_mid_prev:
-            return TrendState.UP_PULLBACK
-        return TrendState.UP_WEAK
-
-    if close > short_upper_prev and close < long_upper_prev:
-        return TrendState.DOWN_REBOUND
-    return TrendState.RANGE
+    return state
 
 
-def _state_targets(state: TrendState, previous_position: float,
-                   transition_days: int, config: StrategyConfig) -> Tuple[float, float, float, str]:
+def _state_targets(
+    primary_regime: PrimaryRegime,
+    tactical_state: TacticalState,
+    config: StrategyConfig,
+) -> Tuple[float, float, float, str]:
     """返回 (base_target, cap, floor, reason)。"""
-    if state == TrendState.UP_STRONG:
-        return 10.0, 10.0, 8.0, '收盘价突破短/长上轨（基于昨日轨线），强上升趋势'
-    if state == TrendState.UP_PULLBACK:
-        return 8.0, 10.0, 6.0, '长期向上或长中轨上行，短期回调但多头未破坏'
-    if state == TrendState.UP_WEAK:
-        return 6.0, 8.0, 4.0, '收盘价位于上行长中轨之上，多头弱势延续'
-    if state == TrendState.DOWN_STRONG:
-        return 0.0, 0.0, 0.0, '收盘价跌破短/长下轨（基于昨日轨线），强下降趋势'
-    if state == TrendState.DOWN_REBOUND:
-        return 2.0, 4.0, 0.0, '短期突破短上轨但仍在长上轨下方，下降中的反弹'
-    if state == TrendState.RANGE:
-        if transition_days >= config.transition_decay_days:
-            base = config.range_target_position
-            reason = f'连续 {transition_days} 日震荡/过渡，衰减至区间目标仓位 {base}'
-        elif not pd.isna(previous_position):
-            base = float(previous_position)
-            reason = f'震荡/过渡，暂继承上一有效仓位 {base}（{transition_days}/{config.transition_decay_days} 日后衰减）'
-        else:
-            base = config.range_target_position
-            reason = f'震荡/无明确趋势，使用区间目标仓位 {base}'
-        return base, 6.0, 0.0, reason
+    if primary_regime == PrimaryRegime.BULL:
+        if tactical_state == TacticalState.ACCELERATION:
+            return 10.0, 10.0, 8.0, 'BULL/ACCELERATION：长中轨上行且突破前 20 根高点，趋势核心仓位满仓'
+        if tactical_state == TacticalState.NORMAL:
+            return 8.0, 10.0, 6.0, 'BULL/NORMAL：长中轨上行且站上短中轨，趋势核心仓位至少 8'
+        if tactical_state == TacticalState.PULLBACK:
+            return 6.0, 8.0, 6.0, 'BULL/PULLBACK：长中轨上行中的回调，趋势 floor 保持 6'
+        return 6.0, 8.0, 4.0, 'BULL/WEAK：多头未破坏但短线偏弱，保持核心观察仓'
+    if primary_regime == PrimaryRegime.NEUTRAL:
+        return config.range_target_position, 6.0, 0.0, 'NEUTRAL：趋势不明，使用区间基准仓位'
+    if primary_regime == PrimaryRegime.BEAR:
+        if tactical_state == TacticalState.REBOUND:
+            return 2.0, 4.0, 0.0, 'BEAR/REBOUND：下降趋势中的反弹，仅允许轻仓'
+        return 0.0, 0.0, 0.0, 'BEAR/RISK：风险趋势，只有硬退出才允许降到 4 以下'
     return np.nan, 0.0, 0.0, '数据不足或冷启动'
 
 
@@ -156,6 +217,8 @@ def compute_trend_decision(
     n = len(ch)
 
     states = []
+    primary_regimes = []
+    tactical_states = []
     bases = []
     caps = []
     floors = []
@@ -167,6 +230,7 @@ def compute_trend_decision(
 
     prev_position = np.nan
     transition_days = 0
+    ch['previous_20_high'] = ch['High'].shift(1).rolling(20, min_periods=1).max()
 
     for i in range(n):
         row = ch.iloc[i]
@@ -203,26 +267,27 @@ def compute_trend_decision(
         else:
             long_mid_bear_confirm_days = 0
 
-        state = classify_trend_state(
+        primary_regime, tactical_state, state = classify_trend_components(
             close, sh_up_p, sh_lo_p, lg_up_p, lg_lo_p,
             short_mid_prev=sh_mid_p,
             long_mid_prev=lg_mid_p,
             short_mid_slope=sm_slope,
             long_mid_slope=lm_slope,
+            previous_20_high=row.get('previous_20_high', np.nan),
         )
         states.append(state.value)
+        primary_regimes.append(primary_regime.value)
+        tactical_states.append(tactical_state.value)
 
         if state == TrendState.UNKNOWN:
             base, cap, floor, reason = np.nan, 0.0, 0.0, '冷启动或轨线未就绪'
             transition_days = 0
         else:
-            if state == TrendState.RANGE:
+            if primary_regime == PrimaryRegime.NEUTRAL:
                 transition_days += 1
             else:
                 transition_days = 0
-            base, cap, floor, reason = _state_targets(
-                state, prev_position, transition_days, config,
-            )
+            base, cap, floor, reason = _state_targets(primary_regime, tactical_state, config)
 
         prev_positions.append(prev_position)
         bases.append(base)
@@ -247,6 +312,8 @@ def compute_trend_decision(
 
     out = ch.copy()
     out['trend_state'] = states
+    out['primary_regime'] = primary_regimes
+    out['tactical_state'] = tactical_states
     out['base_target_position'] = bases
     out['position_cap'] = caps
     out['position_floor'] = floors

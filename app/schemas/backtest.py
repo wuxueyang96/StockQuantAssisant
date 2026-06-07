@@ -14,10 +14,12 @@ class BacktestConfig:
     commission_rate: float = 0.0003
     slippage_bps: float = 5.0
     min_bars: int = 90
+    warmup_bars: Optional[int] = None
     lot_size: int = 1
     benchmark: str = 'buy_hold'
     enable_trend: bool = True
     enable_structure: bool = True
+    enable_structure_position_adjustment: bool = False
     enable_sequence: bool = True
     enable_execution_rules: bool = True
 
@@ -88,13 +90,20 @@ class BacktestMetrics:
     cumulative_allocation_drag: float = 0.0
     cumulative_cost_drag: float = 0.0
     missed_upside_return: float = 0.0
+    fixed_same_average_position_total_return: float = 0.0
+    timing_alpha_vs_fixed_same_position: float = 0.0
     target_flip_count: int = 0
     count_10_to_4: int = 0
     count_4_to_10: int = 0
     days_position_below_60pct_when_long_trend_up: int = 0
+    days_position_below_60pct_when_bull: int = 0
+    days_position_below_80pct_when_close_above_long_mid: int = 0
     structure_caused_reduction_days: int = 0
     sequence_caused_reduction_days: int = 0
     trend_state_days_distribution: Dict[str, int] = field(default_factory=dict)
+    position_bucket_attribution: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    trend_state_attribution: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    trend_regime_attribution: Dict[str, Dict[str, float]] = field(default_factory=dict)
     exposure: float = 0.0
     turnover: float = 0.0
     benchmark_total_return: float = 0.0

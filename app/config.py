@@ -44,6 +44,9 @@ class Config:
     ITICK_RETRIES = int(os.environ.get('ITICK_RETRIES', '3'))
     ITICK_FREE_MIN_INTERVAL_SECONDS = float(os.environ.get('ITICK_FREE_MIN_INTERVAL_SECONDS', '13'))
     ITICK_FREE_REFRESH_LIMIT = int(os.environ.get('ITICK_FREE_REFRESH_LIMIT', '1000'))
+    ITICK_DAILY_CHECK = _env_bool('ITICK_DAILY_CHECK', True)
+    ITICK_DAILY_PRICE_TOLERANCE = float(os.environ.get('ITICK_DAILY_PRICE_TOLERANCE', '0.03'))
+    ITICK_DAILY_VOLUME_REL_TOLERANCE = float(os.environ.get('ITICK_DAILY_VOLUME_REL_TOLERANCE', '0.05'))
 
     # 采集层只拉取最细粒度的 5min K 线，daily / 60min / 90min / 120min 由 app.services.resample
     # 在运行时合成。这样能同时绕开三件事：

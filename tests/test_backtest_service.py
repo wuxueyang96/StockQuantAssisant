@@ -120,6 +120,19 @@ def test_simulate_backtest_does_not_rebalance_on_hold_signal():
     assert result.trades[0].date.startswith('2024-01-02')
 
 
+def test_metrics_include_fixed_same_average_position_benchmark():
+    result = simulate_backtest(
+        _daily_frame(),
+        _decisions(),
+        BacktestConfig(initial_cash=1000.0, commission_rate=0.0, slippage_bps=0.0),
+    )
+
+    assert hasattr(result.metrics, 'fixed_same_average_position_total_return')
+    assert hasattr(result.metrics, 'timing_alpha_vs_fixed_same_position')
+    assert isinstance(result.metrics.position_bucket_attribution, dict)
+    assert '80-100%' in result.metrics.position_bucket_attribution
+
+
 def test_simulate_backtest_accepts_tz_aware_index_with_date_range():
     daily = _daily_frame()
     daily.index = daily.index.tz_localize('Asia/Shanghai')
@@ -162,6 +175,31 @@ def test_backtest_api_returns_metrics(client):
     assert 'equity_curve' in result
     assert 'signals' in result
     assert len(result['equity_curve']) >= 2
+
+
+def test_backtest_api_outputs_warmup_boundaries(client):
+    from app.models.database import db_manager
+    dates = pd.bdate_range('2024-01-01', periods=80)
+    start_date = dates[50].strftime('%Y-%m-%d')
+    expected_data_start = dates[30].strftime('%Y-%m-%d')
+    db_manager.insert_data('a', 'A_000002.SZ_5min', _make_5min(80))
+
+    resp = client.post('/api/stock/backtest', json={
+        'stock': '000002',
+        'start_date': start_date,
+        'initial_cash': 100000,
+        'commission_rate': 0,
+        'slippage_bps': 0,
+        'min_bars': 30,
+        'warmup_bars': 20,
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    result = resp.get_json()['results'][0]
+    assert result['data_start'].startswith(expected_data_start)
+    assert result['backtest_start'].startswith(start_date)
+    assert result['warmup_bars'] == 20
+    assert result['available_warmup_bars'] == 20
+    assert result['effective_signal_start'].startswith(start_date)
 
 
 def test_backtest_api_missing_stock(client):

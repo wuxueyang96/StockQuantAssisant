@@ -16,6 +16,30 @@ class TrendState(str, Enum):
     UNKNOWN = 'UNKNOWN'
 
 
+class PrimaryRegime(str, Enum):
+    BULL = 'BULL'
+    NEUTRAL = 'NEUTRAL'
+    BEAR = 'BEAR'
+    UNKNOWN = 'UNKNOWN'
+
+
+class TacticalState(str, Enum):
+    ACCELERATION = 'ACCELERATION'
+    NORMAL = 'NORMAL'
+    PULLBACK = 'PULLBACK'
+    WEAK = 'WEAK'
+    REBOUND = 'REBOUND'
+    RISK = 'RISK'
+
+
+class StructureState(str, Enum):
+    NONE = 'NONE'
+    WARNING = 'WARNING'
+    CONFIRMED = 'CONFIRMED'
+    FAILED = 'FAILED'
+    EXPIRED = 'EXPIRED'
+
+
 class StructureBias(str, Enum):
     BULLISH_EDGE = 'BULLISH_EDGE'
     BEARISH_EDGE = 'BEARISH_EDGE'
@@ -83,6 +107,7 @@ class StrategyConfig:
     max_panic_gap_atr_multiple: float = 0.8
     enable_trend: bool = True
     enable_structure: bool = True
+    enable_structure_position_adjustment: bool = False
     enable_sequence: bool = True
     enable_execution_rules: bool = True
     structure_valid_days_by_period: Dict[str, int] = field(

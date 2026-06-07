@@ -154,7 +154,7 @@ class TestIntegratedDecision:
         assert last['trend_state'] == 'RANGE'
         assert last['base_target_position'] == 4.0
 
-    def test_up_strong_top_structure_cannot_drop_to_4(self):
+    def test_up_strong_top_structure_warning_does_not_change_position_by_default(self):
         struct_ctx = {
             'has_conflict': False,
             'top_active': True,
@@ -172,8 +172,9 @@ class TestIntegratedDecision:
             row, struct_ctx, adj, bias.value, warnings, [],
             actual_position=10.0,
         )
-        assert decision.raw_target_position == 8.0
-        assert decision.final_target_position == 8.0
+        assert decision.raw_target_position == 10.0
+        assert decision.final_target_position == 10.0
+        assert 'STRUCTURE_POSITION_ADJUSTMENT_DISABLED' in decision.structure_effect
 
     def test_up_pullback_high9_does_not_direct_sell(self):
         from app.algos.sequence import compute_sequence_execution_rules
@@ -255,6 +256,27 @@ class TestIntegratedDecision:
             long_mid_slope=0.01,
         )
         assert state in (TrendState.UP_WEAK, TrendState.UP_PULLBACK)
+
+    def test_bull_short_mid_up_target_at_least_8(self):
+        from app.algos.trend import compute_trend_decision
+        dates = pd.date_range('2024-01-01', periods=80, freq='B')
+        closes = np.linspace(80.0, 140.0, len(dates))
+        df = pd.DataFrame({
+            'Open': closes,
+            'High': closes * 1.01,
+            'Low': closes * 0.99,
+            'Close': closes,
+            'Volume': [100000] * len(dates),
+        }, index=dates)
+        cfg = StrategyConfig(short_period=5, long_period=20)
+        result = compute_trend_decision(df, cfg)
+        mask = (
+            result['primary_regime'].eq('BULL')
+            & result['Close'].gt(result['short_mid_prev'])
+            & result['short_mid_slope'].gt(0)
+        )
+        assert mask.any()
+        assert result.loc[mask, 'base_target_position'].min() >= 8.0
 
     def test_ablation_switches_disable_structure_and_sequence(self):
         from app.algos.integrated_decision import evaluate_integrated_dataframe

@@ -4,6 +4,7 @@ import pandas as pd
 from app.algos.config import STRUCTURE_PERIOD_PRIORITY
 from app.algos.structure import (
     aggregate_structure_context,
+    append_structure_state_machine,
     compute_structure_adjustment,
     enrich_structure_row_with_trading_validity,
 )
@@ -94,3 +95,26 @@ class TestStructureBoundaries:
 
         assert ctx['active_periods'] == []
         assert ctx['strongest_event'] == 'none'
+
+    def test_structure_state_machine_confirms_top_warning(self):
+        dates = pd.date_range('2024-01-01', periods=7, freq='B')
+        closes = [10.0, 10.2, 10.1, 10.3, 10.4, 12.0, 9.5]
+        df = pd.DataFrame({
+            'Open': closes,
+            'High': [x + 0.1 for x in closes],
+            'Low': [x - 0.1 for x in closes],
+            'Close': closes,
+            'Volume': [1000] * len(closes),
+            'top_divergence': [False, False, False, False, False, True, False],
+            'top_structure_75': [False] * len(closes),
+            'top_structure_100': [False] * len(closes),
+            'bottom_divergence': [False] * len(closes),
+            'bottom_structure_75': [False] * len(closes),
+            'bottom_structure_100': [False] * len(closes),
+        }, index=dates)
+
+        out = append_structure_state_machine(df, horizon_bars=3, timeframe='daily')
+
+        assert out.iloc[5]['structure_event'] == 'TOP_WARNING'
+        assert out.iloc[6]['structure_event'] == 'TOP_CONFIRMED'
+        assert out.iloc[6]['top_structure_state'] == 'CONFIRMED'

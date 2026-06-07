@@ -369,6 +369,12 @@ def merge_trend_structure_sequence(
     base = trend_row.get('base_target_position')
     cap = float(trend_row.get('position_cap', 0))
     floor = float(trend_row.get('position_floor', 0))
+    suggested_struct_adj = int(struct_adj or 0)
+    effective_struct_warnings = list(struct_warnings)
+    if not config.enable_structure_position_adjustment:
+        if suggested_struct_adj != 0:
+            effective_struct_warnings.append('STRUCTURE_POSITION_ADJUSTMENT_DISABLED')
+        struct_adj = 0
 
     seq_ctx = SequenceContext(
         high9_active=bool(trend_row.get('high9_active', False)),
@@ -384,7 +390,7 @@ def merge_trend_structure_sequence(
         highest_timeframe_event=str(struct_ctx.get('highest_timeframe_event', 'none')),
         resonance_count=int(struct_ctx.get('resonance_count', 0)),
         resonance_weight=float(struct_ctx.get('resonance_weight', 0.0)),
-        warnings=list(struct_warnings),
+        warnings=effective_struct_warnings,
     )
 
     if trend_state == TrendState.UNKNOWN.value or pd.isna(base):
@@ -417,6 +423,11 @@ def merge_trend_structure_sequence(
 
     if hard_exit and final_target > actual_position:
         final_target = actual_position
+    if not hard_exit and final_target < 4.0:
+        if actual_position >= 4.0:
+            final_target = 4.0
+        elif final_target < actual_position:
+            final_target = actual_position
 
     prev_action = str(previous_action or '').upper()
     prev_target = previous_final_target_position
@@ -467,7 +478,7 @@ def merge_trend_structure_sequence(
     conf = _confidence_label(struct_ctx, seq_ctx, struct_adj)
 
     atr_pct = trend_row.get('atr_pct')
-    effective_warnings = struct_warnings if config.enable_execution_rules else []
+    effective_warnings = effective_struct_warnings if config.enable_execution_rules else []
     effective_seq_rules = list(seq_rules) if config.enable_execution_rules else []
     principle, forbidden, no_trade, invalidation = build_execution_guidance(
         action=action,
@@ -493,7 +504,7 @@ def merge_trend_structure_sequence(
         hard_exit=bool(hard_exit),
         hard_exit_reason=hard_exit_reason if hard_exit else '',
         target_reversal_warning=target_reversal_warning,
-        structure_effect=_structure_effect_text(struct_ctx, struct_adj, struct_warnings),
+        structure_effect=_structure_effect_text(struct_ctx, struct_adj, effective_struct_warnings),
         sequence_effect=_sequence_effect_text(seq_ctx),
     )
     return final_target, cap, floor, decision, seq_ctx, structure_ctx
@@ -589,10 +600,15 @@ def build_daily_trading_plan(
         short_lower_prev=_round4(last_t.get('short_lower_prev')),
         long_upper_prev=_round4(last_t.get('long_upper_prev')),
         long_lower_prev=_round4(last_t.get('long_lower_prev')),
+        short_mid_prev=_round4(last_t.get('short_mid_prev')),
+        long_mid_prev=_round4(last_t.get('long_mid_prev')),
+        previous_20_high=_round4(last_t.get('previous_20_high')),
         short_upper_current=_round4(last_t.get('short_upper')),
         short_lower_current=_round4(last_t.get('short_lower')),
         long_upper_current=_round4(last_t.get('long_upper')),
         long_lower_current=_round4(last_t.get('long_lower')),
+        short_mid_current=_round4(last_t.get('short_mid')),
+        long_mid_current=_round4(last_t.get('long_mid')),
     )
     trend_ctx = TrendContext(
         state=str(last_t.get('trend_state', TrendState.UNKNOWN.value)),
@@ -602,6 +618,8 @@ def build_daily_trading_plan(
         position_floor=float(last_t.get('position_floor', 0)),
         previous_position=_round4(last_t.get('previous_position'))
         if pd.notna(last_t.get('previous_position')) else None,
+        primary_regime=str(last_t.get('primary_regime', 'UNKNOWN')),
+        tactical_state=str(last_t.get('tactical_state', 'NORMAL')),
         key_lines=key_lines,
         quality=TrendQuality(
             short_mid_slope=_round4(last_t.get('short_mid_slope')),
@@ -755,16 +773,20 @@ def evaluate_integrated_dataframe(
     result = df_daily.copy()
 
     cols = [
-        'trend_state', 'base_target_position', 'position_cap', 'position_floor',
+        'trend_state', 'primary_regime', 'tactical_state',
+        'base_target_position', 'position_cap', 'position_floor',
         'final_target_position', 'raw_target_position', 'actual_position',
         'order_delta', 'order_weight',
         'action', 'signal_strength', 'confidence_label', 'structure_adjustment',
         'sequence_adjustment', 'trend_reason', 'decision_reason', 'principle',
         'structure_effect', 'sequence_effect', 'hard_exit_reason',
         'target_reversal_warning', 'high9_active', 'low9_active', 'hard_exit',
+        'short_mid_prev', 'long_mid_prev', 'short_mid_slope', 'long_mid_slope',
+        'previous_20_high',
     ]
     object_cols = {
-        'trend_state', 'action', 'confidence_label',
+        'trend_state', 'primary_regime', 'tactical_state',
+        'action', 'confidence_label',
         'trend_reason', 'decision_reason', 'principle',
         'structure_effect', 'sequence_effect', 'hard_exit_reason',
         'target_reversal_warning',
@@ -818,6 +840,8 @@ def evaluate_integrated_dataframe(
         idx = df_daily.index[i]
         dec = plan.decision
         result.at[idx, 'trend_state'] = plan.trend.state
+        result.at[idx, 'primary_regime'] = plan.trend.primary_regime
+        result.at[idx, 'tactical_state'] = plan.trend.tactical_state
         result.at[idx, 'base_target_position'] = plan.trend.base_target_position
         result.at[idx, 'position_cap'] = plan.trend.position_cap
         result.at[idx, 'position_floor'] = plan.trend.position_floor
@@ -841,6 +865,12 @@ def evaluate_integrated_dataframe(
         result.at[idx, 'target_reversal_warning'] = dec.target_reversal_warning
         result.at[idx, 'high9_active'] = plan.sequence.high9_active
         result.at[idx, 'low9_active'] = plan.sequence.low9_active
+        trend_row_full = trend_df.iloc[i]
+        result.at[idx, 'short_mid_prev'] = trend_row_full.get('short_mid_prev')
+        result.at[idx, 'long_mid_prev'] = trend_row_full.get('long_mid_prev')
+        result.at[idx, 'short_mid_slope'] = trend_row_full.get('short_mid_slope')
+        result.at[idx, 'long_mid_slope'] = trend_row_full.get('long_mid_slope')
+        result.at[idx, 'previous_20_high'] = trend_row_full.get('previous_20_high')
         result.at[idx, 'position'] = dec.final_target_position
         result.at[idx, 'prev_position'] = dec.actual_position
 

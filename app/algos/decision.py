@@ -117,7 +117,7 @@ class DecisionEngine:
                 bottom_structure_active=struct_ctx.get('bottom_active', False),
             )
 
-            _, _, _, decision, _, _ = merge_trend_structure_sequence(
+            _, _, _, decision, _, structure_ctx = merge_trend_structure_sequence(
                 trend_row,
                 struct_ctx,
                 struct_adj,
@@ -149,7 +149,7 @@ class DecisionEngine:
                 else 'trend'
             )
             result.at[idx, 'signal_strength'] = decision.signal_strength
-            result.at[idx, 'structure_adjustment'] = struct_adj
+            result.at[idx, 'structure_adjustment'] = structure_ctx.adjustment
             result.at[idx, 'position_label'] = pos_label
             result.at[idx, 'core_long'] = (
                 decision.final_target_position is not None
@@ -213,10 +213,15 @@ class DecisionEngine:
         struct_std = summary_dict.get('standards', {}).get('structure', {}) or {}
         ndp = summary_dict.get('next_day_plan') or {}
         trend_state = (ndp.get('trend') or {}).get('state')
-        trend_label = self._TREND_STATE_LABEL.get(
-            trend_state,
-            self._POSITION_TO_TREND_LABEL.get(float(pos), '冷启动') if pos is not None else '冷启动',
+        pos_value = float(pos) if pos is not None else None
+        position_trend_label = (
+            self._POSITION_TO_TREND_LABEL.get(pos_value, '冷启动')
+            if pos_value is not None else '冷启动'
         )
+        if pos_value in (4.0, 6.0):
+            trend_label = position_trend_label
+        else:
+            trend_label = self._TREND_STATE_LABEL.get(trend_state, position_trend_label)
 
         channels = self.trend.compute_all(df_daily)
         tomorrow_up = self._extrapolate_next(channels['short_upper'])
